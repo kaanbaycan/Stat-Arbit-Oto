@@ -75,26 +75,23 @@ def load_all_data():
                 sync_msg += " | ⚡ Live Sync OK"
         except: sync_msg += " | ⚠️ History Sync Failed"
     
-    # 2. LIVE PATCH: If last row has NaNs for stocks, use yf.Ticker.fast_info
-    # yf.download Close is often NaN on the current day, but fast_info is live
+    # 2. LIVE PATCH
     stock_cols = list(ALL_STOCKS_MAP.keys())
     if df_nom[stock_cols].iloc[-1].isna().any():
         with st.spinner("📡 Patching missing prices with live market data..."):
             for name, symbol in ALL_STOCKS_MAP.items():
                 if pd.isna(df_nom.at[df_nom.index[-1], name]):
                     try:
-                        live_price = yf.Ticker(symbol).fast_info['lastPrice']
-                        if live_price and live_price > 0:
-                            df_nom.at[df_nom.index[-1], name] = live_price
-                            # For today, Adj Close == Nominal Close
-                            df_adj.at[df_adj.index[-1], name] = live_price
+                        live_p = yf.Ticker(symbol).fast_info['lastPrice']
+                        if live_p and live_p > 0:
+                            df_nom.at[df_nom.index[-1], name] = live_p
+                            df_adj.at[df_adj.index[-1], name] = live_p
                     except: pass
             sync_msg += " | 🟢 Live Patch Applied"
 
     # Final Cleanup
     df_nom = df_nom.ffill().dropna(subset=stock_cols, how='all')
     df_adj = df_adj.ffill().dropna(subset=stock_cols, how='all')
-    
     return {"nom": df_nom, "adj": df_adj}, sync_msg
 
 # 3. Model Logic
@@ -113,7 +110,9 @@ def run_model(df_nom, df_adj, initial_capital=100000, window=30, entry_z=-2.0, e
             half_lives[col] = -np.log(2)/beta if beta < 0 else 99.9
         except: half_lives[col] = 99.9
 
-    cash = initial_capital; positions = {col: 0 for col in df_nom.columns}; entry_p_nom = 0; prev_date = None; history = []; outcomes = {col: [] for col in df_nom.columns}
+    # --- INITIALIZATION ---
+    cash = initial_capital; positions = {col: 0 for col in df_nom.columns}; 
+    current_stock = None; entry_p_nom = 0; prev_date = None; history = []; outcomes = {col: [] for col in df_nom.columns}
     
     for date in df_nom.index:
         row_nom, row_adj = df_nom.loc[date], df_adj.loc[date]; daily_z = z_scores.loc[date]
@@ -157,7 +156,6 @@ def run_model(df_nom, df_adj, initial_capital=100000, window=30, entry_z=-2.0, e
 
 # --- App UI ---
 master_data, sync_msg = load_all_data()
-
 if master_data:
     st.sidebar.markdown(f"<div class='sync-info'>{sync_msg}</div>", unsafe_allow_html=True)
     st.sidebar.header("Global Settings")

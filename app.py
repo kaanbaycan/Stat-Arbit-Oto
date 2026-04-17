@@ -42,9 +42,14 @@ SECTORS = {
     "Steel & Iron": {"EREGL": "EREGL.IS", "KRDMD": "KRDMD.IS", "ISDMR": "ISDMR.IS"}
 }
 
+ALL_STOCKS = []
+for s in SECTORS.values(): 
+    ALL_STOCKS.extend(list(s.keys()))
+
 TICKER_MAP = {}
 for s in SECTORS.values(): 
     TICKER_MAP.update(s)
+TICKER_MAP.update({"USDTRY": "USDTRY=X", "XU100": "^XU100", "GOLD": "GC=F"})
 
 # --- OPTIMIZED DATA LOADING ---
 @st.cache_data(ttl=1800)
@@ -78,7 +83,19 @@ def load_all_data():
                     sync_msg += f" | ⚡ Synced +{len(added)} days live"
         except:
             sync_msg += " | ⚠️ Live sync failed"
-            
+    
+    # --- CRITICAL DATA CLEANING ---
+    # Forward fill to handle small gaps
+    df_nom = df_nom.ffill()
+    df_adj = df_adj.ffill()
+    
+    # Remove trailing rows that are missing STOCK prices (yfinance often returns NaN for today)
+    # We check only columns that are part of our SECTORS
+    stock_cols = [c for c in ALL_STOCKS if c in df_nom.columns]
+    valid_mask = df_nom[stock_cols].notna().any(axis=1)
+    df_nom = df_nom[valid_mask]
+    df_adj = df_adj[valid_mask]
+    
     return {"nom": df_nom, "adj": df_adj}, sync_msg
 
 # 3. Model Logic
@@ -210,7 +227,6 @@ if master_data:
                 })
             else:
                 z_cols = [c for c in latest_r.index if c.endswith('_Z')]
-                # CRITICAL SAFETY: Convert to numeric and drop NA before idxmin
                 z_series = pd.to_numeric(latest_r[z_cols], errors='coerce').dropna()
                 if not z_series.empty:
                     try:
@@ -249,7 +265,7 @@ if master_data:
         active_pos = latest['InPosition']
         
         st.subheader(f"📡 {selected_sector} Detail Terminal")
-        terminal_html = f"<div class='terminal'><div class='terminal-header'>DETAIL TERMINAL | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>"
+        terminal_html = f"<div class='terminal'><div class='terminal-header'>DETAIL TERMINAL | {results.index[-1].strftime('%Y-%m-%d')}</div>"
         if pd.notnull(active_pos):
             p = (latest[f'{active_pos}_Price'] - latest['EntryPrice']) / latest['EntryPrice'] * 100
             terminal_html += f"<div>[ACTIVE]: <span style='color:#ffcc00'>{active_pos}</span> | PROFIT: <span style='color:{'#00ff00' if p >= 0 else '#ff5555'}'>{p:+.2f}%</span></div>"

@@ -239,12 +239,16 @@ if df is not None and not df.empty:
                     if curr_p and not pd.isna(curr_p): moves.append({'Date': d.date(), 'Ticker': curr_p, 'Action': 'BUY', 'Price': r[f"{curr_p}_Price"]})
                 prev = curr_p
             if moves:
-                m_df = pd.DataFrame(moves); m_df['Profit %'] = ""
+                m_df = pd.DataFrame(moves); m_df['Profit %'] = ""; m_df['Hold Duration'] = ""
                 for i in range(len(m_df)):
                     if m_df.iloc[i]['Action'] == 'SELL':
                         for j in range(i-1, -1, -1):
                             if m_df.iloc[j]['Action'] == 'BUY' and m_df.iloc[j]['Ticker'] == m_df.iloc[i]['Ticker']:
-                                bp, sp = m_df.iloc[j]['Price'], m_df.iloc[i]['Price']; m_df.at[i, 'Profit %'] = f"{(sp-bp)/bp*100:+.2f}%"; break
+                                bp, sp = m_df.iloc[j]['Price'], m_df.iloc[i]['Price']
+                                m_df.at[i, 'Profit %'] = f"{(sp-bp)/bp*100:+.2f}%"
+                                duration = (m_df.iloc[i]['Date'] - m_df.iloc[j]['Date']).days
+                                m_df.at[i, 'Hold Duration'] = f"{duration} days"
+                                break
                 st.dataframe(m_df.sort_values('Date', ascending=False), use_container_width=True)
         
         with tabs[3]: st.table(pd.DataFrame({'Win Rate (%)': win_rates, 'Half-Life (Days)': half_lives}))

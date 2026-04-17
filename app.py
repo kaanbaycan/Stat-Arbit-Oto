@@ -44,7 +44,6 @@ SECTORS = {
 
 TICKER_MAP = {}
 for s in SECTORS.values(): TICKER_MAP.update(s)
-TICKER_MAP.update({"USDTRY": "USDTRY=X", "XU100": "^XU100", "GOLD": "GC=F"})
 
 # --- OPTIMIZED DATA LOADING ---
 @st.cache_data(ttl=1800)
@@ -59,7 +58,6 @@ def load_all_data():
     today = datetime.now()
     sync_msg = f"Database: {len(df_nom)} days (Last: {last_date.date()})"
     
-    # Sync gap from yfinance
     if (today - last_date).days >= 1:
         try:
             raw = yf.download(list(TICKER_MAP.values()), start=last_date, progress=False, auto_adjust=False)
@@ -83,6 +81,7 @@ def load_all_data():
 # 3. Model Logic
 def run_model(df_nom, df_adj, initial_capital=100000, window=30, entry_z=-2.0, exit_z=0.5, stop_z=-4.0, abs_stop=0.10, interest_rate=0.35):
     if df_nom.empty or len(df_nom) < window: return None
+    
     mean_adj = df_adj.mean(axis=1); ratios_adj = df_adj.divide(mean_adj, axis=0)
     rolling_mean = ratios_adj.rolling(window=window).mean(); rolling_std = ratios_adj.rolling(window=window).std()
     z_scores = (ratios_adj - rolling_mean) / rolling_std
@@ -100,7 +99,7 @@ def run_model(df_nom, df_adj, initial_capital=100000, window=30, entry_z=-2.0, e
         if prev_date is not None and cash > 0:
             days = (date - prev_date).days
             if days > 0: cash *= (1 + interest_rate / 365) ** days
-        prev_date = date; reversion_probs = daily_z.apply(lambda z: (1 - stats.norm.cdf(z)) * 100 if not pd.isna(z) else 0)
+        prev_date = date; reversion_probs = daily_z.apply(lambda z: (1 - stats.norm.cdf(z)) * 100 if pd.notnull(z) else 0)
         
         buy_nom, sell_nom = {}, {}
         for col in df_nom.columns:
@@ -114,13 +113,13 @@ def run_model(df_nom, df_adj, initial_capital=100000, window=30, entry_z=-2.0, e
 
         if current_stock is not None:
             p_loss = (row_nom[current_stock] - entry_p_nom) / entry_p_nom
-            if not pd.isna(daily_z[current_stock]):
+            if pd.notnull(daily_z[current_stock]):
                 if daily_z[current_stock] >= exit_z or daily_z[current_stock] <= stop_z or p_loss <= -abs_stop:
                     outcomes[current_stock].append(1 if daily_z[current_stock] >= exit_z else 0)
                     cash = positions[current_stock] * row_nom[current_stock]; positions[current_stock] = 0; current_stock = None; entry_p_nom = 0
         
         if current_stock is None:
-            if not daily_z.isna().all():
+            if not daily_z.dropna().empty:
                 min_z = daily_z.min()
                 if min_z <= entry_z:
                     best_stock = daily_z.idxmin(); positions[best_stock] = cash / row_nom[best_stock]; cash = 0; current_stock = best_stock; entry_p_nom = row_nom[best_stock]
@@ -150,18 +149,21 @@ if master_data:
     st.subheader("🎯 Market Opportunity Radar (Nominal Prices)")
     radar_data = []
     for s_name, s_tickers in SECTORS.items():
-        stocks = list(s_tickers.keys())
+        stocks = [s for s in s_tickers.keys() if s in master_data['nom'].columns]
         s_nom, s_adj = master_data['nom'][stocks], master_data['adj'][stocks]
         m_res = run_model(s_nom, s_adj, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate)
         if m_res:
             s_res, _, _ = m_res; latest_r = s_res.iloc[-1]; active_r = latest_r['InPosition']
-            if active_r and not pd.isna(active_r):
+            if pd.notnull(active_r):
                 radar_data.append({'Sector': s_name, 'Status': '🔴 HOLDING', 'Stock': active_r, 'Price': f"{latest_r[f'{active_r}_Price']:,.2f}", 'Rev Prob': f"{latest_r[f'{active_r}_RevProb']:.1f}%", 'Target': f"{latest_r[f'{active_r}_SellPrice']:,.2f}"})
             else:
                 z_cols = [c for c in latest_r.index if c.endswith('_Z')]
-                if not latest_r[z_cols].isna().all():
-                    min_z_s = latest_r[z_cols].idxmin().replace('_Z', '')
-                    radar_data.append({'Sector': s_name, 'Status': '🟢 MONITORING', 'Stock': min_z_s, 'Price': f"{latest_r[f'{min_z_s}_Price']:,.2f}", 'Rev Prob': f"{latest_r[f'{min_z_s}_RevProb']:.1f}%", 'Target': f"{latest_r[f'{min_z_s}_BuyPrice']:,.2f} (BUY)"})
+                z_series = latest_r[z_cols].dropna()
+                if not z_series.empty:
+                    try:
+                        best_ticker_z = z_series.idxmin(); min_z_s = best_ticker_z.replace('_Z', '')
+                        radar_data.append({'Sector': s_name, 'Status': '🟢 MONITORING', 'Stock': min_z_s, 'Price': f"{latest_r[f'{min_z_s}_Price']:,.2f}", 'Rev Prob': f"{latest_r[f'{min_z_s}_RevProb']:.1f}%", 'Target': f"{latest_r[f'{min_z_s}_BuyPrice']:,.2f} (BUY)"})
+                    except: pass
     if radar_data: st.table(pd.DataFrame(radar_data).set_index('Sector'))
 
     st.markdown("---")
@@ -179,7 +181,7 @@ if master_data:
         results, half_lives, win_rates = res_out; latest = results.iloc[-1]; active_pos = latest['InPosition']
         st.subheader(f"📡 {selected_sector} Detail Terminal")
         terminal_html = f"<div class='terminal'><div class='terminal-header'>DETAIL TERMINAL | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>"
-        if active_pos and not pd.isna(active_pos):
+        if pd.notnull(active_pos):
             p = (latest[f'{active_pos}_Price'] - latest['EntryPrice']) / latest['EntryPrice'] * 100
             terminal_html += f"<div>[ACTIVE]: <span style='color:#ffcc00'>{active_pos}</span> | PROFIT: <span style='color:{'#00ff00' if p >= 0 else '#ff5555'}'>{p:+.2f}%</span></div>"
         else: terminal_html += "<div>[ACTIVE]: <span style='color:#888'>CASH_LIQUID</span></div>"
@@ -188,12 +190,9 @@ if master_data:
             terminal_html += f"<div style='display: grid; grid-template-columns: 1fr 1fr 1.2fr 1.2fr 1fr 1fr; padding-top:5px;'><span>{s}</span><span>{latest[f'{s}_Price']:,.2f}</span><span style='color:#00e5ff'>{latest[f'{s}_BuyPrice']:,.2f}</span><span style='color:#ff5555'>{latest[f'{s}_SellPrice']:,.2f}</span><span>{win_rates[s]:.0f}%</span><span>{latest[f'{s}_RevProb']:.1f}%</span></div>"
         st.html(terminal_html + "</div>")
         
-        m1, m2, m3, m4 = st.columns(4); m1.metric("Portfolio Value", f"{latest['TotalValue']:,.0f} TL"); m2.metric("Nominal Profit", f"{(latest['TotalValue']-100000)/1000:.1f}%")
-        bench_aligned = master_data['nom'][['USDTRY', 'XU100', 'GOLD']].reindex(results.index).ffill()
-        s_u = float(bench_aligned['USDTRY'].iloc[0]); c_u = float(bench_aligned['USDTRY'].iloc[-1])
-        m3.metric("vs USDTRY", f"{((latest['TotalValue'] / c_u) / (100000 / s_u) - 1) * 100:,.1f}%"); m4.metric("USDTRY", f"{c_u:,.2f} ₺")
+        m1, m2 = st.columns(2); m1.metric("Portfolio Value", f"{latest['TotalValue']:,.0f} TL"); m2.metric("Nominal Profit", f"{(latest['TotalValue']-100000)/1000:.1f}%")
 
-        tabs = st.tabs(["Sector Comparison", "Benchmark Growth", "History", "Stats"] + stocks_detail)
+        tabs = st.tabs(["Sector Comparison", "History", "Stats"] + stocks_detail)
         with tabs[0]:
             comp_results = []
             for s_n, s_t in SECTORS.items():
@@ -205,18 +204,14 @@ if master_data:
             if comp_results:
                 fig_c, ax_c = plt.subplots(figsize=(10, 4))
                 for r in comp_results: ax_c.plot(r['Series'].index, r['Series'], label=f"{r['Sector']} ({r['Profit %']:.1f}%)")
-                u_norm = bench_aligned['USDTRY'] / float(bench_aligned['USDTRY'].iloc[0]) * 100000
-                ax_c.plot(u_norm.index, u_norm, label="USD/TRY", color='black', linestyle='--', alpha=0.4); ax_c.legend(); st.pyplot(fig_c)
+                ax_c.legend(); st.pyplot(fig_c)
         with tabs[1]:
-            gold_p = bench_aligned['GOLD'] * bench_aligned['USDTRY']; usd_g = (results['TotalValue'] / bench_aligned['USDTRY']) / (100000 / s_u) * 100; gold_g = (results['TotalValue'] / gold_p) / (100000 / gold_p.iloc[0]) * 100
-            fig_r, ax_r = plt.subplots(figsize=(10, 4)); ax_r.plot(results.index, usd_g, label="vs USD"); ax_r.plot(results.index, gold_g, label="vs Gold", color='gold'); ax_r.axhline(100, color='black'); ax_r.legend(); st.pyplot(fig_r)
-        with tabs[2]:
             moves = []; prev = None
             for d, r in results.iterrows():
                 curr_p = r['InPosition']
                 if curr_p != prev:
-                    if prev and not pd.isna(prev): moves.append({'Date': d.date(), 'Ticker': prev, 'Action': 'SELL', 'Price': r[f'{prev}_Price']})
-                    if curr_p and not pd.isna(curr_p): moves.append({'Date': d.date(), 'Ticker': curr_p, 'Action': 'BUY', 'Price': r[f"{curr_p}_Price"]})
+                    if pd.notnull(prev): moves.append({'Date': d.date(), 'Ticker': prev, 'Action': 'SELL', 'Price': r[f'{prev}_Price']})
+                    if pd.notnull(curr_p): moves.append({'Date': d.date(), 'Ticker': curr_p, 'Action': 'BUY', 'Price': r[f"{curr_p}_Price"]})
                 prev = curr_p
             if moves:
                 m_df = pd.DataFrame(moves); m_df['Profit %'] = ""; m_df['Hold Duration'] = ""
@@ -226,9 +221,9 @@ if master_data:
                             if m_df.iloc[j]['Action'] == 'BUY' and m_df.iloc[j]['Ticker'] == m_df.iloc[i]['Ticker']:
                                 bp, sp = m_df.iloc[j]['Price'], m_df.iloc[i]['Price']; m_df.at[i, 'Profit %'] = f"{(sp-bp)/bp*100:+.2f}%"; m_df.at[i, 'Hold Duration'] = f"{(m_df.iloc[i]['Date']-m_df.iloc[j]['Date']).days} days"; break
                 st.dataframe(m_df.sort_values('Date', ascending=False), use_container_width=True)
-        with tabs[3]: st.table(pd.DataFrame({'Win Rate (%)': win_rates, 'Half-Life (Days)': half_lives}))
+        with tabs[2]: st.table(pd.DataFrame({'Win Rate (%)': win_rates, 'Half-Life (Days)': half_lives}))
         for i, name in enumerate(stocks_detail):
-            with tabs[i+4]:
+            with tabs[i+3]:
                 c1, c2 = st.columns(2)
                 with c1:
                     fig_p, ax_p = plt.subplots(); ax_p.plot(results.index, results[f'{name}_Price'], color='gray', alpha=0.5)

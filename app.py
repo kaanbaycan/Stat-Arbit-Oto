@@ -31,7 +31,7 @@ st.markdown("""
         padding-bottom: 5px;
         font-weight: bold;
     }
-    .sync-info { color: #00e5ff; font-size: 0.9em; margin-bottom: 10px; }
+    .sync-info { color: #00e5ff; font-size: 0.8em; margin-bottom: 10px; font-style: italic; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -49,55 +49,44 @@ TICKER_MAP.update({"USDTRY": "USDTRY=X", "XU100": "^XU100", "GOLD": "GC=F"})
 # --- OPTIMIZED DATA LOADING ---
 @st.cache_data(ttl=1800)
 def load_all_data():
-    """Loads all data (sectors + benchmarks) from CSV and syncs only the gap from yfinance."""
     if not os.path.exists("db_nominal.csv") or not os.path.exists("db_adjusted.csv"):
-        st.error("⚠️ Local database not found. Please run database_builder.py first.")
-        return None
+        return None, "Database missing"
 
-    # 1. Load Local
     df_nom = pd.read_csv("db_nominal.csv", index_col='Date', parse_dates=True)
     df_adj = pd.read_csv("db_adjusted.csv", index_col='Date', parse_dates=True)
-
-    # 2. Check for Gap
+    
     last_date = df_nom.index.max()
     today = datetime.now()
+    sync_msg = f"Database: {len(df_nom)} days (Last: {last_date.date()})"
     
+    # Sync gap from yfinance
     if (today - last_date).days >= 1:
-        with st.spinner(f"⚡ Syncing latest market data since {last_date.date()}..."):
-            try:
-                # Fetch only missing days
-                raw = yf.download(list(TICKER_MAP.values()), start=last_date, progress=False, auto_adjust=False)
-                if not raw.empty:
-                    new_nom = raw['Close']
-                    new_adj = raw['Adj Close']
-                    
-                    # Clean Names
-                    inv_map = {v: k for k, v in TICKER_MAP.items()}
-                    new_nom.columns = [inv_map.get(c, c) for c in new_nom.columns]
-                    new_adj.columns = [inv_map.get(c, c) for c in new_adj.columns]
-                    
-                    # Merge (deduplicate)
-                    df_nom = pd.concat([df_nom, new_nom[new_nom.index > last_date]]).sort_index()
+        try:
+            raw = yf.download(list(TICKER_MAP.values()), start=last_date, progress=False, auto_adjust=False)
+            if not raw.empty:
+                new_nom = raw['Close']; new_adj = raw['Adj Close']
+                inv_map = {v: k for k, v in TICKER_MAP.items()}
+                new_nom.columns = [inv_map.get(c, c) for c in new_nom.columns]
+                new_adj.columns = [inv_map.get(c, c) for c in new_adj.columns]
+                
+                added = new_nom[new_nom.index > last_date]
+                if not added.empty:
+                    df_nom = pd.concat([df_nom, added]).sort_index()
                     df_adj = pd.concat([df_adj, new_adj[new_adj.index > last_date]]).sort_index()
-                    
-                    # Optional: Update CSVs for next load speedup
-                    df_nom.to_csv("db_nominal.csv")
-                    df_adj.to_csv("db_adjusted.csv")
-            except Exception as e:
-                st.warning(f"Failed to sync latest days: {e}")
+                    df_nom.to_csv("db_nominal.csv"); df_adj.to_csv("db_adjusted.csv")
+                    sync_msg += f" | ⚡ Synced +{len(added)} days live"
+        except:
+            sync_msg += " | ⚠️ Live sync failed"
+            
+    return {"nom": df_nom, "adj": df_adj}, sync_msg
 
-    return {"nom": df_nom, "adj": df_adj}
-
-# 3. Model Logic (Input is now filtered data)
+# 3. Model Logic
 def run_model(df_nom, df_adj, initial_capital=100000, window=30, entry_z=-2.0, exit_z=0.5, stop_z=-4.0, abs_stop=0.10, interest_rate=0.35):
     if df_nom.empty or len(df_nom) < window: return None
-    
-    # DECISION LOGIC uses ADJ prices
     mean_adj = df_adj.mean(axis=1); ratios_adj = df_adj.divide(mean_adj, axis=0)
     rolling_mean = ratios_adj.rolling(window=window).mean(); rolling_std = ratios_adj.rolling(window=window).std()
     z_scores = (ratios_adj - rolling_mean) / rolling_std
     
-    # Stats: Half-life
     half_lives = {}
     for col in df_adj.columns:
         y = ratios_adj[col].dropna(); y_lag = y.shift(1).dropna(); y_curr = y.iloc[1:]; y_diff = y_curr.values - y_lag.values
@@ -107,13 +96,12 @@ def run_model(df_nom, df_adj, initial_capital=100000, window=30, entry_z=-2.0, e
     cash = initial_capital; positions = {col: 0 for col in df_nom.columns}; current_stock = None; entry_p_nom = 0; prev_date = None; history = []; outcomes = {col: [] for col in df_nom.columns}
     
     for date in df_nom.index:
-        row_nom, row_adj = df_nom.loc[date], df_adj.loc[date]
+        row_nom, row_adj = df_nom.loc[date], df_adj.loc[date]; daily_z = z_scores.loc[date]
         if prev_date is not None and cash > 0:
             days = (date - prev_date).days
             if days > 0: cash *= (1 + interest_rate / 365) ** days
-        prev_date = date; daily_z = z_scores.loc[date]; reversion_probs = daily_z.apply(lambda z: (1 - stats.norm.cdf(z)) * 100)
+        prev_date = date; reversion_probs = daily_z.apply(lambda z: (1 - stats.norm.cdf(z)) * 100 if not pd.isna(z) else 0)
         
-        # TARGETS in NOMINAL terms
         buy_nom, sell_nom = {}, {}
         for col in df_nom.columns:
             n = len(df_nom.columns); conv = row_nom[col] / row_adj[col] if row_adj[col] != 0 else 1
@@ -126,19 +114,22 @@ def run_model(df_nom, df_adj, initial_capital=100000, window=30, entry_z=-2.0, e
 
         if current_stock is not None:
             p_loss = (row_nom[current_stock] - entry_p_nom) / entry_p_nom
-            if daily_z[current_stock] >= exit_z or daily_z[current_stock] <= stop_z or p_loss <= -abs_stop:
-                outcomes[current_stock].append(1 if daily_z[current_stock] >= exit_z else 0)
-                cash = positions[current_stock] * row_nom[current_stock]; positions[current_stock] = 0; current_stock = None; entry_p_nom = 0
+            if not pd.isna(daily_z[current_stock]):
+                if daily_z[current_stock] >= exit_z or daily_z[current_stock] <= stop_z or p_loss <= -abs_stop:
+                    outcomes[current_stock].append(1 if daily_z[current_stock] >= exit_z else 0)
+                    cash = positions[current_stock] * row_nom[current_stock]; positions[current_stock] = 0; current_stock = None; entry_p_nom = 0
+        
         if current_stock is None:
-            min_z = daily_z.min()
-            if min_z <= entry_z:
-                best_stock = daily_z.idxmin(); positions[best_stock] = cash / row_nom[best_stock]; cash = 0; current_stock = best_stock; entry_p_nom = row_nom[best_stock]
+            if not daily_z.isna().all():
+                min_z = daily_z.min()
+                if min_z <= entry_z:
+                    best_stock = daily_z.idxmin(); positions[best_stock] = cash / row_nom[best_stock]; cash = 0; current_stock = best_stock; entry_p_nom = row_nom[best_stock]
         
         total_val = cash + sum(positions[s] * row_nom[s] for s in df_nom.columns)
         state = {'Date': date, 'TotalValue': total_val, 'Cash': cash, 'InPosition': current_stock, 'EntryPrice': entry_p_nom}
         for s in df_nom.columns:
             state[f'{s}_Price'] = row_nom[s]; state[f'{s}_Z'] = daily_z[s]; state[f'{s}_RevProb'] = reversion_probs[s]
-            state[f'{s}_BuyPrice'] = buy_nom[s]; state[f'{s}_SellPrice'] = sell_nom[s]
+            state[f'{s}_BuyPrice'] = buy_nom.get(s, np.nan); state[f'{s}_SellPrice'] = sell_nom.get(s, np.nan)
         history.append(state)
         
     result_df = pd.DataFrame(history).set_index('Date')
@@ -146,9 +137,10 @@ def run_model(df_nom, df_adj, initial_capital=100000, window=30, entry_z=-2.0, e
     return result_df, half_lives, win_rates
 
 # --- App UI ---
-master_data = load_all_data()
+master_data, sync_msg = load_all_data()
 
 if master_data:
+    st.sidebar.markdown(f"<div class='sync-info'>{sync_msg}</div>", unsafe_allow_html=True)
     st.sidebar.header("Global Settings")
     window = st.sidebar.slider("Rolling Window", 10, 100, 30); entry_z = st.sidebar.slider("Entry Z (Buy)", -5.0, -1.0, -2.0)
     exit_z = st.sidebar.slider("Exit Z (Sell)", -1.0, 2.0, 0.5); stop_z = st.sidebar.slider("Stop Z (Relative)", -10.0, -3.0, -4.0)
@@ -169,23 +161,15 @@ if master_data:
                 z_cols = [c for c in latest_r.index if c.endswith('_Z')]
                 if not latest_r[z_cols].isna().all():
                     min_z_s = latest_r[z_cols].idxmin().replace('_Z', '')
-                    radar_data.append({
-                        'Sector': s_name, 'Status': '🟢 MONITORING', 'Stock': min_z_s, 
-                        'Price': f"{latest_r[f'{min_z_s}_Price']:,.2f}", 
-                        'Rev Prob': f"{latest_r[f'{min_z_s}_RevProb']:.1f}%", 
-                        'Target': f"{latest_r[f'{min_z_s}_BuyPrice']:,.2f} (BUY)"
-                    })
+                    radar_data.append({'Sector': s_name, 'Status': '🟢 MONITORING', 'Stock': min_z_s, 'Price': f"{latest_r[f'{min_z_s}_Price']:,.2f}", 'Rev Prob': f"{latest_r[f'{min_z_s}_RevProb']:.1f}%", 'Target': f"{latest_r[f'{min_z_s}_BuyPrice']:,.2f} (BUY)"})
     if radar_data: st.table(pd.DataFrame(radar_data).set_index('Sector'))
 
     st.markdown("---")
     selected_sector = st.sidebar.selectbox("Select Detail Sector", list(SECTORS.keys()))
     if st.sidebar.button("🔄 Force Fresh Refresh"): st.cache_data.clear(); st.rerun()
 
-    # Detail Filter
     years = sorted(master_data['nom'].index.year.unique().tolist())
     year_range = st.sidebar.slider("Analysis Year Range", min_value=years[0], max_value=years[-1], value=(years[0], years[-1]))
-    
-    # Detail Model Run
     stocks_detail = list(SECTORS[selected_sector].keys())
     d_nom = master_data['nom'][stocks_detail][(master_data['nom'].index.year >= year_range[0]) & (master_data['nom'].index.year <= year_range[1])]
     d_adj = master_data['adj'][stocks_detail][(master_data['adj'].index.year >= year_range[0]) & (master_data['adj'].index.year <= year_range[1])]
@@ -193,7 +177,6 @@ if master_data:
     res_out = run_model(d_nom, d_adj, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate)
     if res_out:
         results, half_lives, win_rates = res_out; latest = results.iloc[-1]; active_pos = latest['InPosition']
-        
         st.subheader(f"📡 {selected_sector} Detail Terminal")
         terminal_html = f"<div class='terminal'><div class='terminal-header'>DETAIL TERMINAL | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>"
         if active_pos and not pd.isna(active_pos):
@@ -206,12 +189,9 @@ if master_data:
         st.html(terminal_html + "</div>")
         
         m1, m2, m3, m4 = st.columns(4); m1.metric("Portfolio Value", f"{latest['TotalValue']:,.0f} TL"); m2.metric("Nominal Profit", f"{(latest['TotalValue']-100000)/1000:.1f}%")
-        
-        # Benchmarks
         bench_aligned = master_data['nom'][['USDTRY', 'XU100', 'GOLD']].reindex(results.index).ffill()
         s_u = float(bench_aligned['USDTRY'].iloc[0]); c_u = float(bench_aligned['USDTRY'].iloc[-1])
-        real_p = ((latest['TotalValue'] / c_u) / (100000 / s_u) - 1) * 100
-        m3.metric("vs USDTRY", f"{real_p:,.1f}%"); m4.metric("USDTRY", f"{c_u:,.2f} ₺")
+        m3.metric("vs USDTRY", f"{((latest['TotalValue'] / c_u) / (100000 / s_u) - 1) * 100:,.1f}%"); m4.metric("USDTRY", f"{c_u:,.2f} ₺")
 
         tabs = st.tabs(["Sector Comparison", "Benchmark Growth", "History", "Stats"] + stocks_detail)
         with tabs[0]:
@@ -226,8 +206,7 @@ if master_data:
                 fig_c, ax_c = plt.subplots(figsize=(10, 4))
                 for r in comp_results: ax_c.plot(r['Series'].index, r['Series'], label=f"{r['Sector']} ({r['Profit %']:.1f}%)")
                 u_norm = bench_aligned['USDTRY'] / float(bench_aligned['USDTRY'].iloc[0]) * 100000
-                ax_c.plot(u_norm.index, u_norm, label="USD/TRY", color='black', linestyle='--', alpha=0.4)
-                ax_c.legend(); st.pyplot(fig_c)
+                ax_c.plot(u_norm.index, u_norm, label="USD/TRY", color='black', linestyle='--', alpha=0.4); ax_c.legend(); st.pyplot(fig_c)
         with tabs[1]:
             gold_p = bench_aligned['GOLD'] * bench_aligned['USDTRY']; usd_g = (results['TotalValue'] / bench_aligned['USDTRY']) / (100000 / s_u) * 100; gold_g = (results['TotalValue'] / gold_p) / (100000 / gold_p.iloc[0]) * 100
             fig_r, ax_r = plt.subplots(figsize=(10, 4)); ax_r.plot(results.index, usd_g, label="vs USD"); ax_r.plot(results.index, gold_g, label="vs Gold", color='gold'); ax_r.axhline(100, color='black'); ax_r.legend(); st.pyplot(fig_r)

@@ -46,17 +46,23 @@ SECTORS = {
 @st.cache_data(ttl=1800)
 def load_data_source(tickers_map):
     try:
-        data = yf.download(list(tickers_map.values()), start="2016-01-01", progress=False)['Close']
-        if data.empty: return None
-        if isinstance(data, pd.Series): data = data.to_frame()
-        data.columns = [c.replace('.IS', '') for c in data.columns]
-        return data.ffill().dropna()
+        # Fetch BOTH Adjusted and Nominal prices
+        raw_data = yf.download(list(tickers_map.values()), start="2016-01-01", progress=False)
+        if raw_data.empty: return None
+        
+        df_nom = raw_data['Close'].ffill().dropna()
+        df_adj = raw_data['Adj Close'].ffill().dropna()
+        
+        # Clean columns
+        df_nom.columns = [c.replace('.IS', '') for c in df_nom.columns]
+        df_adj.columns = [c.replace('.IS', '') for c in df_adj.columns]
+        
+        return {"nom": df_nom, "adj": df_adj}
     except: return None
 
 @st.cache_data(ttl=3600)
 def load_benchmarks(start_date):
     try:
-        # USDTRY, BIST100, ONS Gold
         bench_tickers = ["USDTRY=X", "^XU100", "GC=F"]
         data = yf.download(bench_tickers, start=start_date, progress=False)['Close']
         data.columns = ["Gold_ONS", "USDTRY", "XU100"]
@@ -64,61 +70,79 @@ def load_benchmarks(start_date):
     except: return None
 
 # 3. Model Logic
-def run_model(df, initial_capital=100000, window=30, entry_z=-2.0, exit_z=0.5, stop_z=-4.0, abs_stop=0.10, interest_rate=0.35, year_range=None):
-    if df is None or df.empty: return None
-    mean_price = df.mean(axis=1); ratios = df.divide(mean_price, axis=0)
-    rolling_mean = ratios.rolling(window=window).mean(); rolling_std = ratios.rolling(window=window).std()
-    z_scores = (ratios - rolling_mean) / rolling_std
+def run_model(data_dict, initial_capital=100000, window=30, entry_z=-2.0, exit_z=0.5, stop_z=-4.0, abs_stop=0.10, interest_rate=0.35, year_range=None):
+    if not data_dict: return None
+    df_nom = data_dict['nom']
+    df_adj = data_dict['adj']
+    
+    # DECISION LOGIC uses ADJUSTED data
+    mean_price_adj = df_adj.mean(axis=1)
+    ratios_adj = df_adj.divide(mean_price_adj, axis=0)
+    rolling_mean = ratios_adj.rolling(window=window).mean()
+    rolling_std = ratios_adj.rolling(window=window).std()
+    z_scores = (ratios_adj - rolling_mean) / rolling_std
     
     half_lives = {}
-    for col in df.columns:
-        y = ratios[col].dropna(); y_lag = y.shift(1).dropna(); y_curr = y.iloc[1:]; y_diff = y_curr.values - y_lag.values
+    for col in df_adj.columns:
+        y = ratios_adj[col].dropna(); y_lag = y.shift(1).dropna(); y_curr = y.iloc[1:]; y_diff = y_curr.values - y_lag.values
         res = stats.linregress(y_lag.values, y_diff); beta = res.slope
         half_lives[col] = -np.log(2)/beta if beta < 0 else 99.9
 
     if year_range:
-        s_y, e_y = year_range; sim_df = df[(df.index.year >= s_y) & (df.index.year <= e_y)]
+        s_y, e_y = year_range; sim_df = df_nom[(df_nom.index.year >= s_y) & (df_nom.index.year <= e_y)]
         if sim_df.empty: return None
-        start_date = sim_df.index[0]; end_date = sim_df.index[-1]
-    else: start_date = df.index[0]; end_date = df.index[-1]
+        start_date, end_date = sim_df.index[0], sim_df.index[-1]
+    else: start_date, end_date = df_nom.index[0], df_nom.index[-1]
 
-    cash = initial_capital; positions = {col: 0 for col in df.columns}; current_stock = None; entry_price = 0; prev_date = None; history = []; trade_outcomes = {col: [] for col in df.columns}
+    cash = initial_capital; positions = {col: 0 for col in df_nom.columns}; current_stock = None; entry_price_nom = 0; prev_date = None; history = []; trade_outcomes = {col: [] for col in df_nom.columns}
     
-    for date, row in df.iterrows():
+    for date in df_nom.index:
         if date < start_date: continue
         if date > end_date: break
+        
+        row_nom = df_nom.loc[date]
+        row_adj = df_adj.loc[date]
+        
         if prev_date is not None and cash > 0:
             days = (date - prev_date).days
             if days > 0: cash *= (1 + interest_rate / 365) ** days
-        prev_date = date; daily_z = z_scores.loc[date]; prices = row; others_sum = {col: (prices.sum() - prices[col]) for col in df.columns}
+        prev_date = date; daily_z = z_scores.loc[date]; prices_nom = row_nom; others_sum_nom = {col: (prices_nom.sum() - prices_nom[col]) for col in df_nom.columns}
         reversion_probs = daily_z.apply(lambda z: (1 - stats.norm.cdf(z)) * 100)
         
-        buy_prices = {}; sell_prices = {}
-        for col in df.columns:
-            n = len(df.columns); tr_buy = entry_z * rolling_std.loc[date, col] + rolling_mean.loc[date, col]
-            buy_prices[col] = (tr_buy * others_sum[col]) / (n - tr_buy) if n - tr_buy > 0 else np.nan
+        # Calculate Targets in NOMINAL terms
+        buy_prices_nom = {}; sell_prices_nom = {}
+        for col in df_nom.columns:
+            n = len(df_nom.columns)
+            # Use current ratio of Nom/Adj to estimate target nominal price
+            adj_to_nom_ratio = prices_nom[col] / row_adj[col] if row_adj[col] != 0 else 1
+            
+            tr_buy = entry_z * rolling_std.loc[date, col] + rolling_mean.loc[date, col]
+            buy_price_adj = (tr_buy * (row_adj.sum() - row_adj[col])) / (n - tr_buy) if n - tr_buy > 0 else np.nan
+            buy_prices_nom[col] = buy_price_adj * adj_to_nom_ratio
+
             tr_sell = exit_z * rolling_std.loc[date, col] + rolling_mean.loc[date, col]
-            sell_prices[col] = (tr_sell * others_sum[col]) / (n - tr_sell) if n - tr_sell > 0 else np.nan
+            sell_price_adj = (tr_sell * (row_adj.sum() - row_adj[col])) / (n - tr_sell) if n - tr_sell > 0 else np.nan
+            sell_prices_nom[col] = sell_price_adj * adj_to_nom_ratio
 
         if current_stock is not None:
-            p_loss = (prices[current_stock] - entry_price) / entry_price
+            p_loss = (prices_nom[current_stock] - entry_price_nom) / entry_price_nom
             if daily_z[current_stock] >= exit_z or daily_z[current_stock] <= stop_z or p_loss <= -abs_stop:
                 trade_outcomes[current_stock].append(1 if daily_z[current_stock] >= exit_z else 0)
-                cash = positions[current_stock] * prices[current_stock]; positions[current_stock] = 0; current_stock = None; entry_price = 0
+                cash = positions[current_stock] * prices_nom[current_stock]; positions[current_stock] = 0; current_stock = None; entry_price_nom = 0
         if current_stock is None:
             min_z = daily_z.min()
             if min_z <= entry_z:
-                best_stock = daily_z.idxmin(); positions[best_stock] = cash / prices[best_stock]; cash = 0; current_stock = best_stock; entry_price = prices[best_stock]
+                best_stock = daily_z.idxmin(); positions[best_stock] = cash / prices_nom[best_stock]; cash = 0; current_stock = best_stock; entry_price_nom = prices_nom[best_stock]
         
-        total_value = cash + sum(positions[s] * prices[s] for s in df.columns)
-        state = {'Date': date, 'TotalValue': total_value, 'InPosition': current_stock, 'EntryPrice': entry_price}
-        for s in df.columns:
-            state[f'{s}_Price'] = prices[s]; state[f'{s}_Z'] = daily_z[s]; state[f'{s}_RevProb'] = reversion_probs[s]
-            state[f'{s}_BuyPrice'] = buy_prices[s]; state[f'{s}_SellPrice'] = sell_prices[s]
+        total_value = cash + sum(positions[s] * prices_nom[s] for s in df_nom.columns)
+        state = {'Date': date, 'TotalValue': total_value, 'Cash': cash, 'InPosition': current_stock, 'EntryPrice': entry_price_nom}
+        for s in df_nom.columns:
+            state[f'{s}_Price'] = prices_nom[s]; state[f'{s}_Z'] = daily_z[s]; state[f'{s}_RevProb'] = reversion_probs[s]
+            state[f'{s}_BuyPrice'] = buy_prices_nom[s]; state[f'{s}_SellPrice'] = sell_prices_nom[s]
         history.append(state)
         
     result_df = pd.DataFrame(history).set_index('Date')
-    win_rates = {col: (sum(trade_outcomes[col])/len(trade_outcomes[col])*100 if trade_outcomes[col] else 0) for col in df.columns}
+    win_rates = {col: (sum(trade_outcomes[col])/len(trade_outcomes[col])*100 if trade_outcomes[col] else 0) for col in df_nom.columns}
     return result_df, half_lives, win_rates
 
 # --- App UI ---
@@ -134,13 +158,13 @@ abs_stop = st.sidebar.slider("Absolute Stop Loss %", 0.01, 0.30, 0.10)
 interest_rate = st.sidebar.slider("Idle Cash Yearly Interest", 0.0, 1.0, 0.35)
 
 # 0. EXECUTIVE SUMMARY RADAR
-st.subheader("🎯 Market Opportunity Radar")
+st.subheader("🎯 Market Opportunity Radar (Nominal Prices)")
 radar_data = []
 for s_name, s_tickers in SECTORS.items():
-    s_df = load_data_source(s_tickers)
-    if s_df is not None:
-        model_results = run_model(s_df, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate)
-        if model_results is not None:
+    s_data = load_data_source(s_tickers)
+    if s_data:
+        model_results = run_model(s_data, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate)
+        if model_results:
             s_res, _, _ = model_results
             latest_r = s_res.iloc[-1]
             active_r = latest_r['InPosition']
@@ -165,22 +189,21 @@ if radar_data:
 
 st.markdown("---")
 
-# Sidebar Sector Detail
 selected_sector = st.sidebar.selectbox("Select Detail Sector", list(SECTORS.keys()))
 if st.sidebar.button("🔄 Refresh All Data"): st.cache_data.clear()
 
-df = load_data_source(SECTORS[selected_sector])
-if df is not None and not df.empty:
-    years = sorted(df.index.year.unique().tolist())
+detail_data = load_data_source(SECTORS[selected_sector])
+if detail_data:
+    years = sorted(detail_data['nom'].index.year.unique().tolist())
     year_range = st.sidebar.slider("Analysis Year Range", min_value=years[0], max_value=years[-1], value=(years[0], years[-1]))
     
-    results_out = run_model(df, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate, year_range=year_range)
-    if results_out is not None:
+    results_out = run_model(detail_data, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate, year_range=year_range)
+    if results_out:
         results, half_lives, win_rates = results_out
         bench_data = load_benchmarks(results.index[0].strftime('%Y-%m-%d'))
         latest = results.iloc[-1]; active_pos = latest['InPosition']
         
-        st.subheader(f"📡 {selected_sector} Detail Terminal")
+        st.subheader(f"📡 {selected_sector} Detail Terminal (Nominal Prices)")
         terminal_html = f"<div class='terminal'><div class='terminal-header'>DETAIL TERMINAL | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>"
         if active_pos and not pd.isna(active_pos):
             p = (latest[f'{active_pos}_Price'] - latest['EntryPrice']) / latest['EntryPrice'] * 100
@@ -189,7 +212,7 @@ if df is not None and not df.empty:
         
         terminal_html += "<br><div style='display: grid; grid-template-columns: 1fr 1fr 1.2fr 1.2fr 1fr 1fr; border-bottom: 1px solid #333;'>"
         terminal_html += "<span>TICKER</span><span>PRICE</span><span>T_BUY</span><span>T_SELL</span><span>WIN%</span><span>REV%</span></div>"
-        for s in df.columns:
+        for s in detail_data['nom'].columns:
             terminal_html += f"<div style='display: grid; grid-template-columns: 1fr 1fr 1.2fr 1.2fr 1fr 1fr; padding-top:5px;'>"
             terminal_html += f"<span>{s}</span><span>{latest[f'{s}_Price']:,.2f}</span><span style='color:#00e5ff'>{latest[f'{s}_BuyPrice']:,.2f}</span><span style='color:#ff5555'>{latest[f'{s}_SellPrice']:,.2f}</span><span>{win_rates[s]:.0f}%</span><span>{latest[f'{s}_RevProb']:.1f}%</span></div>"
         st.html(terminal_html + "</div>")
@@ -197,67 +220,32 @@ if df is not None and not df.empty:
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Portfolio Value", f"{latest['TotalValue']:,.0f} TL")
         m2.metric("Nominal Profit", f"{(latest['TotalValue']-100000)/1000:.1f}%")
-        
         if bench_data is not None:
             bench_aligned = bench_data.reindex(results.index).ffill()
-            
-            # USDTRY Calc
-            s_usd = float(bench_aligned['USDTRY'].iloc[0])
-            c_usd = float(bench_aligned['USDTRY'].iloc[-1])
-            real_prof_usd = ((latest['TotalValue'] / c_usd) / (100000 / s_usd) - 1) * 100
-            m3.metric("vs USDTRY", f"{real_prof_usd:,.1f}%")
-            
-            # XU100 Calc
-            s_xu = float(bench_aligned['XU100'].iloc[0])
-            c_xu = float(bench_aligned['XU100'].iloc[-1])
-            real_prof_xu = ((latest['TotalValue'] / c_xu) / (100000 / s_xu) - 1) * 100
-            m4.metric("vs XU100 (BIST)", f"{real_prof_xu:,.1f}%")
+            s_u = float(bench_aligned['USDTRY'].iloc[0]); c_u = float(bench_aligned['USDTRY'].iloc[-1])
+            real_p = ((latest['TotalValue'] / c_u) / (100000 / s_u) - 1) * 100
+            m3.metric("vs USDTRY", f"{real_p:,.1f}%"); m4.metric("USDTRY", f"{c_u:,.2f} ₺")
 
-        tabs = st.tabs(["Sector Comparison", "Benchmark Growth", "History", "Stats"] + list(df.columns))
+        tabs = st.tabs(["Sector Comparison", "Benchmark Growth", "History", "Stats"] + list(detail_data['nom'].columns))
         with tabs[0]:
             comp_results = []
             for s_n, s_t in SECTORS.items():
                 s_d = load_data_source(s_t)
                 model_res = run_model(s_d, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate, year_range=year_range)
-                if model_res is not None:
+                if model_res:
                     s_r, _, _ = model_res
                     comp_results.append({'Sector': s_n, 'Series': s_r['TotalValue'], 'Profit %': (s_r['TotalValue'].iloc[-1]-100000)/1000})
-            
             if comp_results:
                 fig_c, ax_c = plt.subplots(figsize=(10, 4))
                 for r in comp_results: ax_c.plot(r['Series'].index, r['Series'], label=f"{r['Sector']} ({r['Profit %']:.1f}%)")
-                
-                if bench_data is not None:
-                    bench_comp = bench_data.reindex(comp_results[0]['Series'].index).ffill()
-                    # USD Norm
-                    u_norm = bench_comp['USDTRY'] / float(bench_comp['USDTRY'].iloc[0]) * 100000
-                    ax_c.plot(u_norm.index, u_norm, label="USD/TRY", color='black', linestyle='--', alpha=0.4)
-                    # XU100 Norm
-                    x_norm = bench_comp['XU100'] / float(bench_comp['XU100'].iloc[0]) * 100000
-                    ax_c.plot(x_norm.index, x_norm, label="XU100 (BIST)", color='red', linestyle=':', alpha=0.5)
-                
-                ax_c.set_title("Strategy Performance vs Major Benchmarks (TL Basis)")
                 ax_c.legend(); st.pyplot(fig_c)
 
         with tabs[1]:
-            st.subheader("📈 Relative Performance (Normalized to 100)")
             if bench_data is not None:
-                bench_rel = bench_data.reindex(results.index).ffill()
-                
-                tl_g = results['TotalValue'] / 100000 * 100
-                usd_g = (results['TotalValue'] / bench_rel['USDTRY']) / (100000 / float(bench_rel['USDTRY'].iloc[0])) * 100
-                xu_g = (results['TotalValue'] / bench_rel['XU100']) / (100000 / float(bench_rel['XU100'].iloc[0])) * 100
-                gold_g = (results['TotalValue'] / (bench_rel['Gold_ONS'] * bench_rel['USDTRY'])) / (100000 / (float(bench_rel['Gold_ONS'].iloc[0]) * float(bench_rel['USDTRY'].iloc[0]))) * 100
-                
-                fig_b, ax_b = plt.subplots(figsize=(10, 4))
-                ax_b.plot(results.index, tl_g, label="Nominal (TL)", color='gray', alpha=0.3)
-                ax_b.plot(results.index, usd_g, label="vs USD", color='blue')
-                ax_b.plot(results.index, xu_g, label="vs XU100", color='red')
-                ax_b.plot(results.index, gold_g, label="vs Gold (Gram)", color='gold', linewidth=2)
-                ax_b.axhline(100, color='black', linestyle='-')
-                ax_b.set_title("Real Purchasing Power Growth (Value > 100 means beating the asset)")
-                ax_b.legend(); st.pyplot(fig_b)
-                st.info("The chart shows your growth relative to each asset. If a line is above 100, you are outperforming that asset.")
+                gold_p = bench_aligned['Gold_ONS'] * bench_aligned['USDTRY']
+                usd_g = (results['TotalValue'] / bench_aligned['USDTRY']) / (100000 / s_u) * 100
+                gold_g = (results['TotalValue'] / gold_p) / (100000 / gold_p.iloc[0]) * 100
+                fig_r, ax_r = plt.subplots(figsize=(10, 4)); ax_r.plot(results.index, usd_g, label="vs USD"); ax_r.plot(results.index, gold_g, label="vs Gold", color='gold'); ax_r.axhline(100, color='black'); ax_r.legend(); st.pyplot(fig_r)
         
         with tabs[2]:
             moves = []; prev = None
@@ -274,13 +262,12 @@ if df is not None and not df.empty:
                         for j in range(i-1, -1, -1):
                             if m_df.iloc[j]['Action'] == 'BUY' and m_df.iloc[j]['Ticker'] == m_df.iloc[i]['Ticker']:
                                 bp, sp = m_df.iloc[j]['Price'], m_df.iloc[i]['Price']; m_df.at[i, 'Profit %'] = f"{(sp-bp)/bp*100:+.2f}%"
-                                dur = (m_df.iloc[i]['Date'] - m_df.iloc[j]['Date']).days
-                                m_df.at[i, 'Hold Duration'] = f"{dur} days"; break
+                                m_df.at[i, 'Hold Duration'] = f"{(m_df.iloc[i]['Date']-m_df.iloc[j]['Date']).days} days"; break
                 st.dataframe(m_df.sort_values('Date', ascending=False), use_container_width=True)
         
         with tabs[3]: st.table(pd.DataFrame({'Win Rate (%)': win_rates, 'Half-Life (Days)': half_lives}))
         
-        for i, name in enumerate(df.columns):
+        for i, name in enumerate(detail_data['nom'].columns):
             with tabs[i+4]:
                 c1, c2 = st.columns(2)
                 with c1:

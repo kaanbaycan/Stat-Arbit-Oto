@@ -88,9 +88,12 @@ def run_model(df_nom, df_adj, initial_capital=100000, window=30, entry_z=-2.0, e
     
     half_lives = {}
     for col in df_adj.columns:
-        y = ratios_adj[col].dropna(); y_lag = y.shift(1).dropna(); y_curr = y.iloc[1:]; y_diff = y_curr.values - y_lag.values
-        res = stats.linregress(y_lag.values, y_diff); beta = res.slope
-        half_lives[col] = -np.log(2)/beta if beta < 0 else 99.9
+        try:
+            y = ratios_adj[col].dropna(); y_lag = y.shift(1).dropna(); y_curr = y.iloc[1:]; y_diff = y_curr.values - y_lag.values
+            res = stats.linregress(y_lag.values, y_diff); beta = res.slope
+            half_lives[col] = -np.log(2)/beta if beta < 0 else 99.9
+        except:
+            half_lives[col] = 99.9
 
     cash = initial_capital; positions = {col: 0 for col in df_nom.columns}; current_stock = None; entry_p_nom = 0; prev_date = None; history = []; outcomes = {col: [] for col in df_nom.columns}
     
@@ -150,6 +153,7 @@ if master_data:
     radar_data = []
     for s_name, s_tickers in SECTORS.items():
         stocks = [s for s in s_tickers.keys() if s in master_data['nom'].columns]
+        if not stocks: continue
         s_nom, s_adj = master_data['nom'][stocks], master_data['adj'][stocks]
         m_res = run_model(s_nom, s_adj, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate)
         if m_res:
@@ -158,7 +162,7 @@ if master_data:
                 radar_data.append({'Sector': s_name, 'Status': '🔴 HOLDING', 'Stock': active_r, 'Price': f"{latest_r[f'{active_r}_Price']:,.2f}", 'Rev Prob': f"{latest_r[f'{active_r}_RevProb']:.1f}%", 'Target': f"{latest_r[f'{active_r}_SellPrice']:,.2f}"})
             else:
                 z_cols = [c for c in latest_r.index if c.endswith('_Z')]
-                z_series = latest_r[z_cols].dropna()
+                z_series = latest_r[z_cols].apply(pd.to_numeric, errors='coerce').dropna()
                 if not z_series.empty:
                     try:
                         best_ticker_z = z_series.idxmin(); min_z_s = best_ticker_z.replace('_Z', '')
@@ -196,7 +200,8 @@ if master_data:
         with tabs[0]:
             comp_results = []
             for s_n, s_t in SECTORS.items():
-                stocks_c = list(s_t.keys())
+                stocks_c = [s for s in s_t.keys() if s in master_data['nom'].columns]
+                if not stocks_c: continue
                 sc_nom = master_data['nom'][stocks_c][(master_data['nom'].index.year >= year_range[0]) & (master_data['nom'].index.year <= year_range[1])]
                 sc_adj = master_data['adj'][stocks_c][(master_data['adj'].index.year >= year_range[0]) & (master_data['adj'].index.year <= year_range[1])]
                 model_res = run_model(sc_nom, sc_adj, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate)

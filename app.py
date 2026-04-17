@@ -42,7 +42,7 @@ SECTORS = {
     "Steel & Iron": {"EREGL": "EREGL.IS", "KRDMD": "KRDMD.IS", "ISDMR": "ISDMR.IS"}
 }
 
-# 1. Data Loading (Pure yfinance)
+# 1. Data Loading
 @st.cache_data(ttl=1800)
 def load_data_source(tickers_map):
     try:
@@ -51,8 +51,7 @@ def load_data_source(tickers_map):
         if isinstance(data, pd.Series): data = data.to_frame()
         data.columns = [c.replace('.IS', '') for c in data.columns]
         return data.ffill().dropna()
-    except:
-        return None
+    except: return None
 
 @st.cache_data(ttl=3600)
 def load_benchmarks(start_date):
@@ -141,30 +140,30 @@ for s_name, s_tickers in SECTORS.items():
         model_results = run_model(s_df, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate)
         if model_results is not None:
             s_res, _, _ = model_results
-            latest = s_res.iloc[-1]
-            active = latest['InPosition']
-            if active and not pd.isna(active):
+            latest_r = s_res.iloc[-1]
+            active_r = latest_r['InPosition']
+            if active_r and not pd.isna(active_r):
                 radar_data.append({
-                    'Sector': s_name, 'Status': '🔴 HOLDING', 'Stock': active,
-                    'Price': f"{latest[f'{active}_Price']:,.2f}", 'Rev Prob': f"{latest[f'{active}_RevProb']:.1f}%",
-                    'Target': f"{latest[f'{active}_SellPrice']:,.2f}"
+                    'Sector': s_name, 'Status': '🔴 HOLDING', 'Stock': active_r,
+                    'Price': f"{latest_r[f'{active_r}_Price']:,.2f}", 'Rev Prob': f"{latest_r[f'{active_r}_RevProb']:.1f}%",
+                    'Target': f"{latest_r[f'{active_r}_SellPrice']:,.2f}"
                 })
             else:
-                z_cols = [c for c in latest.index if c.endswith('_Z')]
-                min_z_stock = latest[z_cols].idxmin().replace('_Z', '')
+                z_cols = [c for c in latest_r.index if c.endswith('_Z')]
+                min_z_stock = latest_r[z_cols].idxmin().replace('_Z', '')
                 radar_data.append({
                     'Sector': s_name, 'Status': '🟢 MONITORING', 'Stock': min_z_stock,
-                    'Price': f"{latest[f'{min_z_stock}_Price']:,.2f}", 'Rev Prob': f"{latest[f'{min_z_stock}_RevProb']:.1f}%",
-                    'Target': f"{latest[f'{min_z_stock}_BuyPrice']:,.2f} (BUY)"
+                    'Price': f"{latest_r[f'{min_z_stock}_Price']:,.2f}", 'Rev Prob': f"{latest_r[f'{min_z_stock}_RevProb']:.1f}%",
+                    'Target': f"{latest_r[f'{min_z_stock}_BuyPrice']:,.2f} (BUY)"
                 })
-    time.sleep(0.5)
+    time.sleep(0.3)
 
 if radar_data:
     st.table(pd.DataFrame(radar_data).set_index('Sector'))
 
 st.markdown("---")
 
-# Sidebar Sector
+# Sidebar Sector Detail
 selected_sector = st.sidebar.selectbox("Select Detail Sector", list(SECTORS.keys()))
 if st.sidebar.button("🔄 Refresh All Data"): st.cache_data.clear()
 
@@ -199,8 +198,9 @@ if df is not None and not df.empty:
         
         if usd_data is not None:
             usd_aligned = usd_data.reindex(results.index).ffill()
-            s_usd = float(usd_aligned.values[0][0]) if isinstance(usd_aligned, pd.DataFrame) else float(usd_aligned.iloc[0])
-            c_usd = float(usd_aligned.values[-1][0]) if isinstance(usd_aligned, pd.DataFrame) else float(usd_aligned.iloc[-1])
+            # Robust scalar conversion
+            s_usd = float(usd_aligned.values[0][0]) if usd_aligned.shape[1] > 0 else float(usd_aligned.iloc[0])
+            c_usd = float(usd_aligned.values[-1][0]) if usd_aligned.shape[1] > 0 else float(usd_aligned.iloc[-1])
             real_prof = ((latest['TotalValue'] / c_usd) / (100000 / s_usd) - 1) * 100
             m3.metric("Real Profit (USD)", f"{real_prof:,.1f}%"); m4.metric("USDTRY", f"{c_usd:,.2f} ₺")
 
@@ -219,8 +219,8 @@ if df is not None and not df.empty:
                 for r in comp_results: ax_c.plot(r['Series'].index, r['Series'], label=f"{r['Sector']} ({r['Profit %']:.1f}%)")
                 if u_bench is not None:
                     u_aligned = u_bench.reindex(comp_results[0]['Series'].index).ffill()
-                    u_start = float(u_aligned.values[0][0]) if isinstance(u_aligned, pd.DataFrame) else float(u_aligned.iloc[0])
-                    u_norm = u_aligned / u_start * 100000
+                    u_s = float(u_aligned.values[0][0]) if u_aligned.shape[1] > 0 else float(u_aligned.iloc[0])
+                    u_norm = u_aligned / u_s * 100000
                     ax_c.plot(u_norm.index, u_norm, label="USD Benchmark", color='black', linestyle='--', alpha=0.6)
                 ax_c.legend(); st.pyplot(fig_c)
 

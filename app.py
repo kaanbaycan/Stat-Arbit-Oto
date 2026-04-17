@@ -6,6 +6,7 @@ import os
 import yfinance as yf
 from datetime import datetime
 import scipy.stats as stats
+import time
 
 # Set page config
 st.set_page_config(page_title="Multi-Sector Stat-Arb Dashboard", layout="wide")
@@ -169,7 +170,7 @@ for s_name, s_tickers in SECTORS.items():
             s_res, _, _ = model_results
             latest = s_res.iloc[-1]
             active = latest['InPosition']
-            if active:
+            if active and not pd.isna(active):
                 radar_data.append({
                     'Sector': s_name,
                     'Status': '🔴 HOLDING',
@@ -189,6 +190,8 @@ for s_name, s_tickers in SECTORS.items():
                     'Rev Prob': f"{latest[f'{min_z_stock}_RevProb']:.1f}%",
                     'Target': f"{latest[f'{min_z_stock}_BuyPrice']:,.2f} (BUY)"
                 })
+    time.sleep(0.5) # Sleep to avoid rate limiting
+
 if radar_data:
     st.table(pd.DataFrame(radar_data).set_index('Sector'))
 
@@ -206,15 +209,15 @@ if df is not None and not df.empty:
     years = sorted(df.index.year.unique().tolist())
     year_range = st.sidebar.slider("Analysis Year Range", min_value=years[0], max_value=years[-1], value=(years[0], years[-1]))
     
-    results, half_lives, win_rates = run_model(df, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate, year_range=year_range)
-
-    if results is not None:
+    results_out = run_model(df, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate, year_range=year_range)
+    if results_out is not None:
+        results, half_lives, win_rates = results_out
         usd_data = load_benchmarks(results.index[0].strftime('%Y-%m-%d'))
         latest = results.iloc[-1]; active_pos = latest['InPosition']
         st.subheader(f"📡 {selected_sector} Detail Terminal")
         
         terminal_html = f"<div class='terminal'><div class='terminal-header'>DETAIL TERMINAL | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>"
-        if active_pos:
+        if active_pos and not pd.isna(active_pos):
             p = (latest[f'{active_pos}_Price'] - latest['EntryPrice']) / latest['EntryPrice'] * 100
             terminal_html += f"<div>[ACTIVE]: <span style='color:#ffcc00'>{active_pos}</span> | PROFIT: <span style='color:{'#00ff00' if p >= 0 else '#ff5555'}'>{p:+.2f}%</span></div>"
         else: terminal_html += "<div>[ACTIVE]: <span style='color:#888'>CASH_LIQUID</span></div>"
@@ -240,8 +243,9 @@ if df is not None and not df.empty:
             usd_bench = load_benchmarks(datetime(year_range[0], 1, 1).strftime('%Y-%m-%d'))
             for s_n, s_t in SECTORS.items():
                 s_d = load_data_source("Live yfinance (Automated)", s_t)
-                s_r, _, s_w = run_model(s_d, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate, year_range=year_range)
-                if s_r is not None:
+                model_res = run_model(s_d, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate, year_range=year_range)
+                if model_res is not None:
+                    s_r, _, s_w = model_res
                     comp_results.append({'Sector': s_n, 'Series': s_r['TotalValue'], 'Profit %': (s_r['TotalValue'].iloc[-1]-100000)/1000})
             if comp_results:
                 fig_c, ax_c = plt.subplots(figsize=(10, 4))
@@ -260,10 +264,11 @@ if df is not None and not df.empty:
         with tabs[2]:
             moves = []; prev = None
             for d, r in results.iterrows():
-                if r['InPosition'] != prev:
-                    if prev: moves.append({'Date': d.date(), 'Ticker': prev, 'Action': 'SELL', 'Price': r[f'{prev}_Price']})
-                    if r['InPosition']: moves.append({'Date': d.date(), 'Ticker': r['InPosition'], 'Action': 'BUY', 'Price': r[f"{r['InPosition']}_Price"]})
-                prev = r['InPosition']
+                curr_p = r['InPosition']
+                if curr_p != prev:
+                    if prev and not pd.isna(prev): moves.append({'Date': d.date(), 'Ticker': prev, 'Action': 'SELL', 'Price': r[f'{prev}_Price']})
+                    if curr_p and not pd.isna(curr_p): moves.append({'Date': d.date(), 'Ticker': curr_p, 'Action': 'BUY', 'Price': r[f"{curr_p}_Price"]})
+                prev = curr_p
             if moves:
                 m_df = pd.DataFrame(moves); m_df['Profit %'] = ""
                 for i in range(len(m_df)):
@@ -280,8 +285,10 @@ if df is not None and not df.empty:
                 c1, c2 = st.columns(2)
                 with c1:
                     fig_p, ax_p = plt.subplots(); ax_p.plot(results.index, results[f'{name}_Price'], color='gray', alpha=0.5)
-                    pos = results['InPosition']; b = results.index[(pos == name) & (pos.shift(1) != name)]; s = results.index[(pos != name) & (pos.shift(1) == name)]
-                    ax_p.scatter(b, results.loc[b, f'{name}_Price'], color='green', marker='^'); ax_p.scatter(s, results.loc[s, f'{name}_Price'], color='red', marker='v'); st.pyplot(fig_p)
+                    pos = results['InPosition']
+                    buys = results.index[(pos == name) & (pos.shift(1) != name)]
+                    sells = results.index[(pos != name) & (pos.shift(1) == name)]
+                    ax_p.scatter(buys, results.loc[buys, f'{name}_Price'], color='green', marker='^'); ax_p.scatter(sells, results.loc[sells, f'{name}_Price'], color='red', marker='v'); st.pyplot(fig_p)
                 with c2:
                     fig_z, ax_z = plt.subplots(); ax_z.plot(results.index, results[f'{name}_Z'], color='purple'); ax_z.axhline(entry_z, color='green', linestyle='--'); ax_z.axhline(exit_z, color='red', linestyle='--'); st.pyplot(fig_z)
 else: st.error("Data error.")

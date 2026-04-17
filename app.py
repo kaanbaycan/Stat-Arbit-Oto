@@ -56,9 +56,11 @@ def load_data_source(tickers_map):
 @st.cache_data(ttl=3600)
 def load_benchmarks(start_date):
     try:
-        usd = yf.download("USDTRY=X", start=start_date, progress=False)['Close']
-        if isinstance(usd, pd.Series): usd = usd.to_frame()
-        return usd.ffill()
+        # USDTRY, BIST100, ONS Gold
+        bench_tickers = ["USDTRY=X", "^XU100", "GC=F"]
+        data = yf.download(bench_tickers, start=start_date, progress=False)['Close']
+        data.columns = ["Gold_ONS", "USDTRY", "XU100"]
+        return data.ffill()
     except: return None
 
 # 3. Model Logic
@@ -175,7 +177,7 @@ if df is not None and not df.empty:
     results_out = run_model(df, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate, year_range=year_range)
     if results_out is not None:
         results, half_lives, win_rates = results_out
-        usd_data = load_benchmarks(results.index[0].strftime('%Y-%m-%d'))
+        bench_data = load_benchmarks(results.index[0].strftime('%Y-%m-%d'))
         latest = results.iloc[-1]; active_pos = latest['InPosition']
         
         st.subheader(f"📡 {selected_sector} Detail Terminal")
@@ -194,41 +196,68 @@ if df is not None and not df.empty:
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Portfolio Value", f"{latest['TotalValue']:,.0f} TL")
-        m2.metric("Profit %", f"{(latest['TotalValue']-100000)/1000:.1f}%")
+        m2.metric("Nominal Profit", f"{(latest['TotalValue']-100000)/1000:.1f}%")
         
-        if usd_data is not None:
-            usd_aligned = usd_data.reindex(results.index).ffill()
-            # Robust scalar conversion
-            s_usd = float(usd_aligned.values[0][0]) if usd_aligned.shape[1] > 0 else float(usd_aligned.iloc[0])
-            c_usd = float(usd_aligned.values[-1][0]) if usd_aligned.shape[1] > 0 else float(usd_aligned.iloc[-1])
-            real_prof = ((latest['TotalValue'] / c_usd) / (100000 / s_usd) - 1) * 100
-            m3.metric("Real Profit (USD)", f"{real_prof:,.1f}%"); m4.metric("USDTRY", f"{c_usd:,.2f} ₺")
+        if bench_data is not None:
+            bench_aligned = bench_data.reindex(results.index).ffill()
+            
+            # USDTRY Calc
+            s_usd = float(bench_aligned['USDTRY'].iloc[0])
+            c_usd = float(bench_aligned['USDTRY'].iloc[-1])
+            real_prof_usd = ((latest['TotalValue'] / c_usd) / (100000 / s_usd) - 1) * 100
+            m3.metric("vs USDTRY", f"{real_prof_usd:,.1f}%")
+            
+            # XU100 Calc
+            s_xu = float(bench_aligned['XU100'].iloc[0])
+            c_xu = float(bench_aligned['XU100'].iloc[-1])
+            real_prof_xu = ((latest['TotalValue'] / c_xu) / (100000 / s_xu) - 1) * 100
+            m4.metric("vs XU100 (BIST)", f"{real_prof_xu:,.1f}%")
 
-        tabs = st.tabs(["Sector Comparison", "Real Growth", "History", "Stats"] + list(df.columns))
+        tabs = st.tabs(["Sector Comparison", "Benchmark Growth", "History", "Stats"] + list(df.columns))
         with tabs[0]:
             comp_results = []
-            u_bench = load_benchmarks(datetime(year_range[0], 1, 1).strftime('%Y-%m-%d'))
             for s_n, s_t in SECTORS.items():
                 s_d = load_data_source(s_t)
                 model_res = run_model(s_d, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate, year_range=year_range)
                 if model_res is not None:
                     s_r, _, _ = model_res
                     comp_results.append({'Sector': s_n, 'Series': s_r['TotalValue'], 'Profit %': (s_r['TotalValue'].iloc[-1]-100000)/1000})
+            
             if comp_results:
                 fig_c, ax_c = plt.subplots(figsize=(10, 4))
                 for r in comp_results: ax_c.plot(r['Series'].index, r['Series'], label=f"{r['Sector']} ({r['Profit %']:.1f}%)")
-                if u_bench is not None:
-                    u_aligned = u_bench.reindex(comp_results[0]['Series'].index).ffill()
-                    u_s = float(u_aligned.values[0][0]) if u_aligned.shape[1] > 0 else float(u_aligned.iloc[0])
-                    u_norm = u_aligned / u_s * 100000
-                    ax_c.plot(u_norm.index, u_norm, label="USD Benchmark", color='black', linestyle='--', alpha=0.6)
+                
+                if bench_data is not None:
+                    bench_comp = bench_data.reindex(comp_results[0]['Series'].index).ffill()
+                    # USD Norm
+                    u_norm = bench_comp['USDTRY'] / float(bench_comp['USDTRY'].iloc[0]) * 100000
+                    ax_c.plot(u_norm.index, u_norm, label="USD/TRY", color='black', linestyle='--', alpha=0.4)
+                    # XU100 Norm
+                    x_norm = bench_comp['XU100'] / float(bench_comp['XU100'].iloc[0]) * 100000
+                    ax_c.plot(x_norm.index, x_norm, label="XU100 (BIST)", color='red', linestyle=':', alpha=0.5)
+                
+                ax_c.set_title("Strategy Performance vs Major Benchmarks (TL Basis)")
                 ax_c.legend(); st.pyplot(fig_c)
 
         with tabs[1]:
-            if usd_data is not None:
-                usd_vals = usd_aligned.values.flatten()
-                usd_g = (results['TotalValue'] / usd_vals) / (100000 / s_usd) * 100
-                fig_r, ax_r = plt.subplots(figsize=(10, 4)); ax_r.plot(results.index, results['TotalValue']/1000, label="TL Growth", color='gray', alpha=0.5); ax_r.plot(results.index, usd_g*100, label="USD Growth", color='green'); ax_r.legend(); st.pyplot(fig_r)
+            st.subheader("📈 Relative Performance (Normalized to 100)")
+            if bench_data is not None:
+                bench_rel = bench_data.reindex(results.index).ffill()
+                
+                tl_g = results['TotalValue'] / 100000 * 100
+                usd_g = (results['TotalValue'] / bench_rel['USDTRY']) / (100000 / float(bench_rel['USDTRY'].iloc[0])) * 100
+                xu_g = (results['TotalValue'] / bench_rel['XU100']) / (100000 / float(bench_rel['XU100'].iloc[0])) * 100
+                gold_g = (results['TotalValue'] / (bench_rel['Gold_ONS'] * bench_rel['USDTRY'])) / (100000 / (float(bench_rel['Gold_ONS'].iloc[0]) * float(bench_rel['USDTRY'].iloc[0]))) * 100
+                
+                fig_b, ax_b = plt.subplots(figsize=(10, 4))
+                ax_b.plot(results.index, tl_g, label="Nominal (TL)", color='gray', alpha=0.3)
+                ax_b.plot(results.index, usd_g, label="vs USD", color='blue')
+                ax_b.plot(results.index, xu_g, label="vs XU100", color='red')
+                ax_b.plot(results.index, gold_g, label="vs Gold (Gram)", color='gold', linewidth=2)
+                ax_b.axhline(100, color='black', linestyle='-')
+                ax_b.set_title("Real Purchasing Power Growth (Value > 100 means beating the asset)")
+                ax_b.legend(); st.pyplot(fig_b)
+                st.info("The chart shows your growth relative to each asset. If a line is above 100, you are outperforming that asset.")
         
         with tabs[2]:
             moves = []; prev = None
@@ -244,11 +273,9 @@ if df is not None and not df.empty:
                     if m_df.iloc[i]['Action'] == 'SELL':
                         for j in range(i-1, -1, -1):
                             if m_df.iloc[j]['Action'] == 'BUY' and m_df.iloc[j]['Ticker'] == m_df.iloc[i]['Ticker']:
-                                bp, sp = m_df.iloc[j]['Price'], m_df.iloc[i]['Price']
-                                m_df.at[i, 'Profit %'] = f"{(sp-bp)/bp*100:+.2f}%"
-                                duration = (m_df.iloc[i]['Date'] - m_df.iloc[j]['Date']).days
-                                m_df.at[i, 'Hold Duration'] = f"{duration} days"
-                                break
+                                bp, sp = m_df.iloc[j]['Price'], m_df.iloc[i]['Price']; m_df.at[i, 'Profit %'] = f"{(sp-bp)/bp*100:+.2f}%"
+                                dur = (m_df.iloc[i]['Date'] - m_df.iloc[j]['Date']).days
+                                m_df.at[i, 'Hold Duration'] = f"{dur} days"; break
                 st.dataframe(m_df.sort_values('Date', ascending=False), use_container_width=True)
         
         with tabs[3]: st.table(pd.DataFrame({'Win Rate (%)': win_rates, 'Half-Life (Days)': half_lives}))
@@ -258,9 +285,8 @@ if df is not None and not df.empty:
                 c1, c2 = st.columns(2)
                 with c1:
                     fig_p, ax_p = plt.subplots(); ax_p.plot(results.index, results[f'{name}_Price'], color='gray', alpha=0.5)
-                    pos = results['InPosition']
-                    buys = results.index[(pos == name) & (pos.shift(1) != name)]; sells = results.index[(pos != name) & (pos.shift(1) == name)]
-                    ax_p.scatter(buys, results.loc[buys, f'{name}_Price'], color='green', marker='^'); ax_p.scatter(sells, results.loc[sells, f'{name}_Price'], color='red', marker='v'); st.pyplot(fig_p)
+                    pos = results['InPosition']; b = results.index[(pos == name) & (pos.shift(1) != name)]; s = results.index[(pos != name) & (pos.shift(1) == name)]
+                    ax_p.scatter(b, results.loc[b, f'{name}_Price'], color='green', marker='^'); ax_p.scatter(s, results.loc[s, f'{name}_Price'], color='red', marker='v'); st.pyplot(fig_p)
                 with c2:
                     fig_z, ax_z = plt.subplots(); ax_z.plot(results.index, results[f'{name}_Z'], color='purple'); ax_z.axhline(entry_z, color='green', linestyle='--'); ax_z.axhline(exit_z, color='red', linestyle='--'); st.pyplot(fig_z)
 else: st.error("Data error.")

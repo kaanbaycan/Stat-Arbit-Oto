@@ -148,37 +148,74 @@ def run_model(df, initial_capital=100000, window=30, entry_z=-2.0, exit_z=0.5, s
 
 # --- App UI ---
 st.title("Sector Stat-Arb Dashboard")
-st.sidebar.header("Strategy Settings")
-selected_sector = st.sidebar.selectbox("Select Active Sector", list(SECTORS.keys()))
-source_mode = st.sidebar.radio("Data Source (Active)", ["Live yfinance (Automated)", "Local Excel"] if selected_sector == "Automotive" else ["Live yfinance (Automated)"])
+
+# Sidebar Strategy Settings
+st.sidebar.header("Global Settings")
+window = st.sidebar.slider("Rolling Window", 10, 100, 30)
+entry_z = st.sidebar.slider("Entry Z (Buy)", -5.0, -1.0, -2.0)
+exit_z = st.sidebar.slider("Exit Z (Sell)", -1.0, 2.0, 0.5)
+stop_z = st.sidebar.slider("Stop Z (Relative)", -10.0, -3.0, -4.0)
+abs_stop = st.sidebar.slider("Absolute Stop Loss %", 0.01, 0.30, 0.10)
+interest_rate = st.sidebar.slider("Idle Cash Yearly Interest", 0.0, 1.0, 0.35)
+
+# 0. EXECUTIVE SUMMARY RADAR
+st.subheader("🎯 Market Opportunity Radar")
+radar_data = []
+for s_name, s_tickers in SECTORS.items():
+    s_df = load_data_source("Live yfinance (Automated)", s_tickers)
+    s_res, _, _ = run_model(s_df, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate)
+    if s_res is not None:
+        latest = s_res.iloc[-1]
+        active = latest['InPosition']
+        if active:
+            radar_data.append({
+                'Sector': s_name,
+                'Status': '🔴 HOLDING',
+                'Stock': active,
+                'Price': f"{latest[f'{active}_Price']:,.2f}",
+                'Rev Prob': f"{latest[f'{active}_RevProb']:.1f}%",
+                'Target': f"{latest[f'{active}_SellPrice']:,.2f}"
+            })
+        else:
+            # Find closest to buy (min Z)
+            z_cols = [c for c in latest.index if c.endswith('_Z')]
+            min_z_stock = latest[z_cols].idxmin().replace('_Z', '')
+            radar_data.append({
+                'Sector': s_name,
+                'Status': '🟢 MONITORING',
+                'Stock': min_z_stock,
+                'Price': f"{latest[f'{min_z_stock}_Price']:,.2f}",
+                'Rev Prob': f"{latest[f'{min_z_stock}_RevProb']:.1f}%",
+                'Target': f"{latest[f'{min_z_stock}_BuyPrice']:,.2f} (BUY)"
+            })
+if radar_data:
+    st.table(pd.DataFrame(radar_data).set_index('Sector'))
+
+st.markdown("---")
+
+# Sidebar Sector & Source
+st.sidebar.header("Active View Settings")
+selected_sector = st.sidebar.selectbox("Select Detail Sector", list(SECTORS.keys()))
+source_mode = st.sidebar.radio("Data Source (Detail)", ["Live yfinance (Automated)", "Local Excel"] if selected_sector == "Automotive" else ["Live yfinance (Automated)"])
 
 if st.sidebar.button("🔄 Refresh All Data"): st.cache_data.clear()
 
 df = load_data_source(source_mode, SECTORS[selected_sector])
 if df is not None and not df.empty:
-    st.sidebar.markdown("---")
     years = sorted(df.index.year.unique().tolist())
     year_range = st.sidebar.slider("Analysis Year Range", min_value=years[0], max_value=years[-1], value=(years[0], years[-1]))
-    window = st.sidebar.slider("Rolling Window", 10, 100, 30)
-    entry_z = st.sidebar.slider("Entry Z (Buy)", -5.0, -1.0, -2.0)
-    exit_z = st.sidebar.slider("Exit Z (Sell)", -1.0, 2.0, 0.5)
-    stop_z = st.sidebar.slider("Stop Z (Relative)", -10.0, -3.0, -4.0)
-    abs_stop = st.sidebar.slider("Absolute Stop Loss %", 0.01, 0.30, 0.10)
-    interest_rate = st.sidebar.slider("Idle Cash Yearly Interest", 0.0, 1.0, 0.35)
-
+    
     results, half_lives, win_rates = run_model(df, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate, year_range=year_range)
 
     if results is not None:
-        # Load Benchmarks
         usd_data = load_benchmarks(results.index[0].strftime('%Y-%m-%d'))
-        
         latest = results.iloc[-1]; active_pos = latest['InPosition']
-        st.subheader(f"📡 {selected_sector} Trading Terminal ({year_range[0]} - {year_range[1]})")
+        st.subheader(f"📡 {selected_sector} Detail Terminal")
         
-        terminal_html = f"<div class='terminal'><div class='terminal-header'>TERMINAL v2.1 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>"
+        terminal_html = f"<div class='terminal'><div class='terminal-header'>DETAIL TERMINAL | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>"
         if active_pos:
-            profit = (latest[f'{active_pos}_Price'] - latest['EntryPrice']) / latest['EntryPrice'] * 100
-            terminal_html += f"<div>[ACTIVE]: <span style='color:#ffcc00'>{active_pos}</span> | PROFIT: <span style='color:{'#00ff00' if profit >= 0 else '#ff5555'}'>{profit:+.2f}%</span></div>"
+            p = (latest[f'{active_pos}_Price'] - latest['EntryPrice']) / latest['EntryPrice'] * 100
+            terminal_html += f"<div>[ACTIVE]: <span style='color:#ffcc00'>{active_pos}</span> | PROFIT: <span style='color:{'#00ff00' if p >= 0 else '#ff5555'}'>{p:+.2f}%</span></div>"
         else: terminal_html += "<div>[ACTIVE]: <span style='color:#888'>CASH_LIQUID</span></div>"
         
         terminal_html += "<br><div style='display: grid; grid-template-columns: 1fr 1fr 1.2fr 1.2fr 1fr 1fr; border-bottom: 1px solid #333;'>"
@@ -188,79 +225,37 @@ if df is not None and not df.empty:
             terminal_html += f"<span>{s}</span><span>{latest[f'{s}_Price']:,.2f}</span><span style='color:#00e5ff'>{latest[f'{s}_BuyPrice']:,.2f}</span><span style='color:#ff5555'>{latest[f'{s}_SellPrice']:,.2f}</span><span>{win_rates[s]:.0f}%</span><span>{latest[f'{s}_RevProb']:.1f}%</span></div>"
         st.html(terminal_html + "</div>")
 
-        # Nominal vs Real Metrics
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Portfolio Value", f"{latest['TotalValue']:,.0f} TL")
-        
-        nom_prof = (latest['TotalValue'] - 100000) / 1000
-        m2.metric("Nominal Profit", f"{nom_prof:,.1f}%", f"{latest['TotalValue']-100000:,.0f} TL")
-        
+        m1.metric("Portfolio Value", f"{latest['TotalValue']:,.0f} TL"); m2.metric("Profit %", f"{(latest['TotalValue']-100000)/1000:.1f}%")
         if usd_data is not None:
-            # Re-align USD to results index
             usd_aligned = usd_data.reindex(results.index).ffill()
-            start_usd = float(usd_aligned.iloc[0])
-            curr_usd = float(usd_aligned.iloc[-1])
-            
-            initial_val_usd = 100000 / start_usd
-            current_val_usd = float(latest['TotalValue']) / curr_usd
-            real_prof_usd = float((current_val_usd - initial_val_usd) / initial_val_usd * 100)
-            
-            m3.metric("Real Profit (USD)", f"{real_prof_usd:,.1f}%", f"{current_val_usd - initial_val_usd:,.0f} USD")
-            m4.metric("Current USDTRY", f"{curr_usd:,.2f} ₺")
-        else:
-            m3.metric("Real Profit (USD)", "N/A")
-            m4.metric("Current USDTRY", "N/A")
+            start_usd = float(usd_aligned.iloc[0]); curr_usd = float(usd_aligned.iloc[-1])
+            real_prof = ((latest['TotalValue'] / curr_usd) / (100000 / start_usd) - 1) * 100
+            m3.metric("Real Profit (USD)", f"{real_prof:,.1f}%"); m4.metric("USDTRY", f"{curr_usd:,.2f} ₺")
 
         tabs = st.tabs(["Sector Comparison", "Real Growth", "History", "Stats"] + list(df.columns))
-        
         with tabs[0]:
-            st.subheader("🏁 Multi-Sector Performance Benchmarking")
             comp_results = []
-            
-            # Fetch USD Benchmark once for the comparison range
             usd_bench = load_benchmarks(datetime(year_range[0], 1, 1).strftime('%Y-%m-%d'))
-            
-            for s_name, s_tickers in SECTORS.items():
-                s_df = load_data_source("Live yfinance (Automated)", s_tickers)
-                s_res, _, s_wr = run_model(s_df, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate, year_range=year_range)
-                if s_res is not None:
-                    final_val = float(s_res['TotalValue'].iloc[-1])
-                    comp_results.append({
-                        'Sector': s_name,
-                        'Series': s_res['TotalValue'],
-                        'Profit %': (final_val - 100000) / 1000,
-                        'Win Rate %': sum(s_wr.values()) / len(s_wr) if s_wr else 0
-                    })
-            
+            for s_n, s_t in SECTORS.items():
+                s_d = load_data_source("Live yfinance (Automated)", s_t)
+                s_r, _, s_w = run_model(s_d, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate, year_range=year_range)
+                if s_r is not None:
+                    comp_results.append({'Sector': s_n, 'Series': s_r['TotalValue'], 'Profit %': (s_r['TotalValue'].iloc[-1]-100000)/1000})
             if comp_results:
-                fig_comp, ax_comp = plt.subplots(figsize=(10, 4))
-                for res in comp_results:
-                    ax_comp.plot(res['Series'].index, res['Series'], label=f"{res['Sector']} ({res['Profit %']:.1f}%)")
-                
-                # Add USD Benchmark Line
+                fig_c, ax_c = plt.subplots(figsize=(10, 4))
+                for r in comp_results: ax_c.plot(r['Series'].index, r['Series'], label=f"{r['Sector']} ({r['Profit %']:.1f}%)")
                 if usd_bench is not None:
-                    usd_aligned_bench = usd_bench.reindex(comp_results[0]['Series'].index).ffill()
-                    usd_normalized = usd_aligned_bench / float(usd_aligned_bench.iloc[0]) * 100000
-                    ax_comp.plot(usd_normalized.index, usd_normalized, label="USD/TRY Benchmark", color='black', linestyle='--', alpha=0.6)
-                
-                ax_comp.set_title("Strategy Performance vs USD Benchmark")
-                ax_comp.legend(); st.pyplot(fig_comp)
-                
-                # Summary Table
-                st.table(pd.DataFrame(comp_results).drop(columns=['Series']).set_index('Sector'))
+                    usd_aligned_b = usd_bench.reindex(comp_results[0]['Series'].index).ffill()
+                    usd_norm = usd_aligned_b / float(usd_aligned_b.iloc[0]) * 100000
+                    ax_c.plot(usd_norm.index, usd_norm, label="USD Benchmark", color='black', linestyle='--', alpha=0.6)
+                ax_c.legend(); st.pyplot(fig_c)
 
         with tabs[1]:
-            st.subheader("📈 Real Growth Analysis (USD Adjusted)")
             if usd_data is not None:
-                usd_growth = (results['TotalValue'] / usd_aligned.values.flatten()) / (100000 / start_usd) * 100
-                tl_growth = results['TotalValue'] / 100000 * 100
-                fig_real, ax_real = plt.subplots(figsize=(10, 4))
-                ax_real.plot(results.index, tl_growth, label="Nominal Growth (TL)", color='gray', alpha=0.5)
-                ax_real.plot(results.index, usd_growth, label="Real Growth (USD Adjusted)", color='green', linewidth=2)
-                ax_real.axhline(100, color='red', linestyle='--', alpha=0.3)
-                ax_real.legend(); st.pyplot(fig_real)
-            else: st.warning("USD data missing for this range.")
-
+                usd_g = (results['TotalValue'] / usd_aligned.values.flatten()) / (100000 / start_usd) * 100
+                fig_r, ax_r = plt.subplots(figsize=(10, 4)); ax_r.plot(results.index, results['TotalValue']/1000, label="TL Growth", color='gray', alpha=0.5); ax_r.plot(results.index, usd_g*1000, label="USD Growth", color='green'); ax_r.legend(); st.pyplot(fig_r)
+        
         with tabs[2]:
             moves = []; prev = None
             for d, r in results.iterrows():
@@ -276,18 +271,16 @@ if df is not None and not df.empty:
                             if m_df.iloc[j]['Action'] == 'BUY' and m_df.iloc[j]['Ticker'] == m_df.iloc[i]['Ticker']:
                                 bp, sp = m_df.iloc[j]['Price'], m_df.iloc[i]['Price']; m_df.at[i, 'Profit %'] = f"{(sp-bp)/bp*100:+.2f}%"; break
                 st.dataframe(m_df.sort_values('Date', ascending=False), use_container_width=True)
-        with tabs[3]:
-            st.table(pd.DataFrame({'Win Rate (%)': win_rates, 'Half-Life (Days)': half_lives}))
+        
+        with tabs[3]: st.table(pd.DataFrame({'Win Rate (%)': win_rates, 'Half-Life (Days)': half_lives}))
         
         for i, name in enumerate(df.columns):
             with tabs[i+4]:
-                st.subheader(f"{name} Analysis")
                 c1, c2 = st.columns(2)
                 with c1:
                     fig_p, ax_p = plt.subplots(); ax_p.plot(results.index, results[f'{name}_Price'], color='gray', alpha=0.5)
                     pos = results['InPosition']; b = results.index[(pos == name) & (pos.shift(1) != name)]; s = results.index[(pos != name) & (pos.shift(1) == name)]
                     ax_p.scatter(b, results.loc[b, f'{name}_Price'], color='green', marker='^'); ax_p.scatter(s, results.loc[s, f'{name}_Price'], color='red', marker='v'); st.pyplot(fig_p)
                 with c2:
-                    fig_z, ax_z = plt.subplots(); ax_z.plot(results.index, results[f'{name}_Z'], color='purple')
-                    ax_z.axhline(entry_z, color='green', linestyle='--'); ax_z.axhline(exit_z, color='red', linestyle='--'); st.pyplot(fig_z)
+                    fig_z, ax_z = plt.subplots(); ax_z.plot(results.index, results[f'{name}_Z'], color='purple'); ax_z.axhline(entry_z, color='green', linestyle='--'); ax_z.axhline(exit_z, color='red', linestyle='--'); st.pyplot(fig_z)
 else: st.error("Data error.")

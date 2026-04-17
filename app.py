@@ -42,44 +42,17 @@ SECTORS = {
     "Steel & Iron": {"EREGL": "EREGL.IS", "KRDMD": "KRDMD.IS", "ISDMR": "ISDMR.IS"}
 }
 
-# 1. Data Loading
+# 1. Data Loading (Pure yfinance)
 @st.cache_data(ttl=1800)
-def load_data_source(mode, tickers_map):
-    if mode == "Live yfinance (Automated)":
-        try:
-            data = yf.download(list(tickers_map.values()), start="2016-01-01", progress=False)['Close']
-            if data.empty: return None
-            if isinstance(data, pd.Series): data = data.to_frame()
-            data.columns = [c.replace('.IS', '') for c in data.columns]
-            return data.ffill().dropna()
-        except: return None
-    else:
-        file_path = 'veri_havuzu-2.xlsx'
-        if not os.path.exists(file_path): return None
-        try:
-            xl = pd.ExcelFile(file_path); dfs = []
-            for sheet in xl.sheet_names:
-                temp_df = pd.read_excel(file_path, sheet_name=sheet)
-                if len(temp_df.columns) < 2: continue
-                col_name = temp_df.columns[1]
-                name = col_name.split(' - ')[1] if ' - ' in col_name else col_name
-                if name not in tickers_map: continue
-                temp_df.columns = ['Date', name]; temp_df['Date'] = pd.to_datetime(temp_df['Date'], format='%d-%m-%Y')
-                temp_df.set_index('Date', inplace=True); dfs.append(temp_df)
-            if not dfs: return None
-            combined = pd.concat(dfs, axis=1).ffill().dropna()
-            last_date = combined.index.max(); today = datetime.now()
-            if (today - last_date).days > 1:
-                try:
-                    recent = yf.download(list(tickers_map.values()), start=last_date, progress=False)['Close']
-                    if not recent.empty:
-                        if isinstance(recent, pd.Series): recent = recent.to_frame()
-                        recent.columns = [c.replace('.IS', '') for c in recent.columns]
-                        recent = recent[recent.index > last_date]
-                        if not recent.empty: combined = pd.concat([combined, recent]).sort_index()
-                except: pass
-            return combined
-        except: return None
+def load_data_source(tickers_map):
+    try:
+        data = yf.download(list(tickers_map.values()), start="2016-01-01", progress=False)['Close']
+        if data.empty: return None
+        if isinstance(data, pd.Series): data = data.to_frame()
+        data.columns = [c.replace('.IS', '') for c in data.columns]
+        return data.ffill().dropna()
+    except:
+        return None
 
 @st.cache_data(ttl=3600)
 def load_benchmarks(start_date):
@@ -163,7 +136,7 @@ interest_rate = st.sidebar.slider("Idle Cash Yearly Interest", 0.0, 1.0, 0.35)
 st.subheader("🎯 Market Opportunity Radar")
 radar_data = []
 for s_name, s_tickers in SECTORS.items():
-    s_df = load_data_source("Live yfinance (Automated)", s_tickers)
+    s_df = load_data_source(s_tickers)
     if s_df is not None:
         model_results = run_model(s_df, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate)
         if model_results is not None:
@@ -172,39 +145,30 @@ for s_name, s_tickers in SECTORS.items():
             active = latest['InPosition']
             if active and not pd.isna(active):
                 radar_data.append({
-                    'Sector': s_name,
-                    'Status': '🔴 HOLDING',
-                    'Stock': active,
-                    'Price': f"{latest[f'{active}_Price']:,.2f}",
-                    'Rev Prob': f"{latest[f'{active}_RevProb']:.1f}%",
+                    'Sector': s_name, 'Status': '🔴 HOLDING', 'Stock': active,
+                    'Price': f"{latest[f'{active}_Price']:,.2f}", 'Rev Prob': f"{latest[f'{active}_RevProb']:.1f}%",
                     'Target': f"{latest[f'{active}_SellPrice']:,.2f}"
                 })
             else:
                 z_cols = [c for c in latest.index if c.endswith('_Z')]
                 min_z_stock = latest[z_cols].idxmin().replace('_Z', '')
                 radar_data.append({
-                    'Sector': s_name,
-                    'Status': '🟢 MONITORING',
-                    'Stock': min_z_stock,
-                    'Price': f"{latest[f'{min_z_stock}_Price']:,.2f}",
-                    'Rev Prob': f"{latest[f'{min_z_stock}_RevProb']:.1f}%",
+                    'Sector': s_name, 'Status': '🟢 MONITORING', 'Stock': min_z_stock,
+                    'Price': f"{latest[f'{min_z_stock}_Price']:,.2f}", 'Rev Prob': f"{latest[f'{min_z_stock}_RevProb']:.1f}%",
                     'Target': f"{latest[f'{min_z_stock}_BuyPrice']:,.2f} (BUY)"
                 })
-    time.sleep(0.5) # Sleep to avoid rate limiting
+    time.sleep(0.5)
 
 if radar_data:
     st.table(pd.DataFrame(radar_data).set_index('Sector'))
 
 st.markdown("---")
 
-# Sidebar Sector & Source
-st.sidebar.header("Active View Settings")
+# Sidebar Sector
 selected_sector = st.sidebar.selectbox("Select Detail Sector", list(SECTORS.keys()))
-source_mode = st.sidebar.radio("Data Source (Detail)", ["Live yfinance (Automated)", "Local Excel"] if selected_sector == "Automotive" else ["Live yfinance (Automated)"])
-
 if st.sidebar.button("🔄 Refresh All Data"): st.cache_data.clear()
 
-df = load_data_source(source_mode, SECTORS[selected_sector])
+df = load_data_source(SECTORS[selected_sector])
 if df is not None and not df.empty:
     years = sorted(df.index.year.unique().tolist())
     year_range = st.sidebar.slider("Analysis Year Range", min_value=years[0], max_value=years[-1], value=(years[0], years[-1]))
@@ -214,8 +178,8 @@ if df is not None and not df.empty:
         results, half_lives, win_rates = results_out
         usd_data = load_benchmarks(results.index[0].strftime('%Y-%m-%d'))
         latest = results.iloc[-1]; active_pos = latest['InPosition']
-        st.subheader(f"📡 {selected_sector} Detail Terminal")
         
+        st.subheader(f"📡 {selected_sector} Detail Terminal")
         terminal_html = f"<div class='terminal'><div class='terminal-header'>DETAIL TERMINAL | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>"
         if active_pos and not pd.isna(active_pos):
             p = (latest[f'{active_pos}_Price'] - latest['EntryPrice']) / latest['EntryPrice'] * 100
@@ -230,36 +194,41 @@ if df is not None and not df.empty:
         st.html(terminal_html + "</div>")
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Portfolio Value", f"{latest['TotalValue']:,.0f} TL"); m2.metric("Profit %", f"{(latest['TotalValue']-100000)/1000:.1f}%")
+        m1.metric("Portfolio Value", f"{latest['TotalValue']:,.0f} TL")
+        m2.metric("Profit %", f"{(latest['TotalValue']-100000)/1000:.1f}%")
+        
         if usd_data is not None:
             usd_aligned = usd_data.reindex(results.index).ffill()
-            start_usd = float(usd_aligned.iloc[0]); curr_usd = float(usd_aligned.iloc[-1])
-            real_prof = ((latest['TotalValue'] / curr_usd) / (100000 / start_usd) - 1) * 100
-            m3.metric("Real Profit (USD)", f"{real_prof:,.1f}%"); m4.metric("USDTRY", f"{curr_usd:,.2f} ₺")
+            s_usd = float(usd_aligned.values[0][0]) if isinstance(usd_aligned, pd.DataFrame) else float(usd_aligned.iloc[0])
+            c_usd = float(usd_aligned.values[-1][0]) if isinstance(usd_aligned, pd.DataFrame) else float(usd_aligned.iloc[-1])
+            real_prof = ((latest['TotalValue'] / c_usd) / (100000 / s_usd) - 1) * 100
+            m3.metric("Real Profit (USD)", f"{real_prof:,.1f}%"); m4.metric("USDTRY", f"{c_usd:,.2f} ₺")
 
         tabs = st.tabs(["Sector Comparison", "Real Growth", "History", "Stats"] + list(df.columns))
         with tabs[0]:
             comp_results = []
-            usd_bench = load_benchmarks(datetime(year_range[0], 1, 1).strftime('%Y-%m-%d'))
+            u_bench = load_benchmarks(datetime(year_range[0], 1, 1).strftime('%Y-%m-%d'))
             for s_n, s_t in SECTORS.items():
-                s_d = load_data_source("Live yfinance (Automated)", s_t)
+                s_d = load_data_source(s_t)
                 model_res = run_model(s_d, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate, year_range=year_range)
                 if model_res is not None:
-                    s_r, _, s_w = model_res
+                    s_r, _, _ = model_res
                     comp_results.append({'Sector': s_n, 'Series': s_r['TotalValue'], 'Profit %': (s_r['TotalValue'].iloc[-1]-100000)/1000})
             if comp_results:
                 fig_c, ax_c = plt.subplots(figsize=(10, 4))
                 for r in comp_results: ax_c.plot(r['Series'].index, r['Series'], label=f"{r['Sector']} ({r['Profit %']:.1f}%)")
-                if usd_bench is not None:
-                    usd_aligned_b = usd_bench.reindex(comp_results[0]['Series'].index).ffill()
-                    usd_norm = usd_aligned_b / float(usd_aligned_b.iloc[0]) * 100000
-                    ax_c.plot(usd_norm.index, usd_norm, label="USD Benchmark", color='black', linestyle='--', alpha=0.6)
+                if u_bench is not None:
+                    u_aligned = u_bench.reindex(comp_results[0]['Series'].index).ffill()
+                    u_start = float(u_aligned.values[0][0]) if isinstance(u_aligned, pd.DataFrame) else float(u_aligned.iloc[0])
+                    u_norm = u_aligned / u_start * 100000
+                    ax_c.plot(u_norm.index, u_norm, label="USD Benchmark", color='black', linestyle='--', alpha=0.6)
                 ax_c.legend(); st.pyplot(fig_c)
 
         with tabs[1]:
             if usd_data is not None:
-                usd_g = (results['TotalValue'] / usd_aligned.values.flatten()) / (100000 / start_usd) * 100
-                fig_r, ax_r = plt.subplots(figsize=(10, 4)); ax_r.plot(results.index, results['TotalValue']/1000, label="TL Growth", color='gray', alpha=0.5); ax_r.plot(results.index, usd_g*1000, label="USD Growth", color='green'); ax_r.legend(); st.pyplot(fig_r)
+                usd_vals = usd_aligned.values.flatten()
+                usd_g = (results['TotalValue'] / usd_vals) / (100000 / s_usd) * 100
+                fig_r, ax_r = plt.subplots(figsize=(10, 4)); ax_r.plot(results.index, results['TotalValue']/1000, label="TL Growth", color='gray', alpha=0.5); ax_r.plot(results.index, usd_g*100, label="USD Growth", color='green'); ax_r.legend(); st.pyplot(fig_r)
         
         with tabs[2]:
             moves = []; prev = None
@@ -286,8 +255,7 @@ if df is not None and not df.empty:
                 with c1:
                     fig_p, ax_p = plt.subplots(); ax_p.plot(results.index, results[f'{name}_Price'], color='gray', alpha=0.5)
                     pos = results['InPosition']
-                    buys = results.index[(pos == name) & (pos.shift(1) != name)]
-                    sells = results.index[(pos != name) & (pos.shift(1) == name)]
+                    buys = results.index[(pos == name) & (pos.shift(1) != name)]; sells = results.index[(pos != name) & (pos.shift(1) == name)]
                     ax_p.scatter(buys, results.loc[buys, f'{name}_Price'], color='green', marker='^'); ax_p.scatter(sells, results.loc[sells, f'{name}_Price'], color='red', marker='v'); st.pyplot(fig_p)
                 with c2:
                     fig_z, ax_z = plt.subplots(); ax_z.plot(results.index, results[f'{name}_Z'], color='purple'); ax_z.axhline(entry_z, color='green', linestyle='--'); ax_z.axhline(exit_z, color='red', linestyle='--'); st.pyplot(fig_z)

@@ -163,31 +163,32 @@ st.subheader("🎯 Market Opportunity Radar")
 radar_data = []
 for s_name, s_tickers in SECTORS.items():
     s_df = load_data_source("Live yfinance (Automated)", s_tickers)
-    s_res, _, _ = run_model(s_df, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate)
-    if s_res is not None:
-        latest = s_res.iloc[-1]
-        active = latest['InPosition']
-        if active:
-            radar_data.append({
-                'Sector': s_name,
-                'Status': '🔴 HOLDING',
-                'Stock': active,
-                'Price': f"{latest[f'{active}_Price']:,.2f}",
-                'Rev Prob': f"{latest[f'{active}_RevProb']:.1f}%",
-                'Target': f"{latest[f'{active}_SellPrice']:,.2f}"
-            })
-        else:
-            # Find closest to buy (min Z)
-            z_cols = [c for c in latest.index if c.endswith('_Z')]
-            min_z_stock = latest[z_cols].idxmin().replace('_Z', '')
-            radar_data.append({
-                'Sector': s_name,
-                'Status': '🟢 MONITORING',
-                'Stock': min_z_stock,
-                'Price': f"{latest[f'{min_z_stock}_Price']:,.2f}",
-                'Rev Prob': f"{latest[f'{min_z_stock}_RevProb']:.1f}%",
-                'Target': f"{latest[f'{min_z_stock}_BuyPrice']:,.2f} (BUY)"
-            })
+    if s_df is not None:
+        model_results = run_model(s_df, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate)
+        if model_results is not None:
+            s_res, _, _ = model_results
+            latest = s_res.iloc[-1]
+            active = latest['InPosition']
+            if active:
+                radar_data.append({
+                    'Sector': s_name,
+                    'Status': '🔴 HOLDING',
+                    'Stock': active,
+                    'Price': f"{latest[f'{active}_Price']:,.2f}",
+                    'Rev Prob': f"{latest[f'{active}_RevProb']:.1f}%",
+                    'Target': f"{latest[f'{active}_SellPrice']:,.2f}"
+                })
+            else:
+                z_cols = [c for c in latest.index if c.endswith('_Z')]
+                min_z_stock = latest[z_cols].idxmin().replace('_Z', '')
+                radar_data.append({
+                    'Sector': s_name,
+                    'Status': '🟢 MONITORING',
+                    'Stock': min_z_stock,
+                    'Price': f"{latest[f'{min_z_stock}_Price']:,.2f}",
+                    'Rev Prob': f"{latest[f'{min_z_stock}_RevProb']:.1f}%",
+                    'Target': f"{latest[f'{min_z_stock}_BuyPrice']:,.2f} (BUY)"
+                })
 if radar_data:
     st.table(pd.DataFrame(radar_data).set_index('Sector'))
 

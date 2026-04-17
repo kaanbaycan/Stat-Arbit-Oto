@@ -166,8 +166,15 @@ if master_data:
             if active_r and not pd.isna(active_r):
                 radar_data.append({'Sector': s_name, 'Status': '🔴 HOLDING', 'Stock': active_r, 'Price': f"{latest_r[f'{active_r}_Price']:,.2f}", 'Rev Prob': f"{latest_r[f'{active_r}_RevProb']:.1f}%", 'Target': f"{latest_r[f'{active_r}_SellPrice']:,.2f}"})
             else:
-                z_cols = [c for c in latest_r.index if c.endswith('_Z')]; min_z_s = latest_r[z_cols].idxmin().replace('_Z', '')
-                radar_data.append({'Sector': s_name, 'Status': '🟢 MONITORING', 'Stock': min_z_s, 'Price': f"{latest_r[f'{min_z_s}_Price']:,.2f}", 'Rev Prob': f"{latest_r[f'{min_z_s}_RevProb']:.1f}%", 'Target': f"{latest_r[f'{min_z_s}_BuyPrice']:,.2f} (BUY)"})
+                z_cols = [c for c in latest_r.index if c.endswith('_Z')]
+                if not latest_r[z_cols].isna().all():
+                    min_z_s = latest_r[z_cols].idxmin().replace('_Z', '')
+                    radar_data.append({
+                        'Sector': s_name, 'Status': '🟢 MONITORING', 'Stock': min_z_s, 
+                        'Price': f"{latest_r[f'{min_z_s}_Price']:,.2f}", 
+                        'Rev Prob': f"{latest_r[f'{min_z_s}_RevProb']:.1f}%", 
+                        'Target': f"{latest_r[f'{min_z_s}_BuyPrice']:,.2f} (BUY)"
+                    })
     if radar_data: st.table(pd.DataFrame(radar_data).set_index('Sector'))
 
     st.markdown("---")

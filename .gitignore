@@ -1,5 +1,10 @@
 *.xlsx
-*.csv
+# Keep the database files for speed on Streamlit Cloud
+!db_nominal.csv
+# Excluding the adjusted one to save space if needed, or include both
+!db_adjusted.csv
+# Exclude other random csvs
+cleaned_data.csv
 *.png
 __pycache__/
 .streamlit/

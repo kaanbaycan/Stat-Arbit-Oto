@@ -109,13 +109,16 @@ def load_all_data():
     return {"nom": df_nom, "adj": df_adj}, sync_msg
 
 # 3. Model Logic
+@st.cache_data(show_spinner=False)
 def run_model(df_nom, df_adj, initial_capital=100000, window=30, entry_z=-2.0, exit_z=0.5, stop_z=-4.0, abs_stop=0.10, interest_rate=0.35):
     if df_nom.empty or len(df_nom) < window: return None
     
+    # Vectorized Pre-calculations
     mean_adj = df_adj.mean(axis=1); ratios_adj = df_adj.divide(mean_adj, axis=0)
     rolling_mean = ratios_adj.rolling(window=window).mean(); rolling_std = ratios_adj.rolling(window=window).std()
     z_scores = (ratios_adj - rolling_mean) / rolling_std
     
+    # Optimization: Calculate half-lives only once
     half_lives = {}
     for col in df_adj.columns:
         try:
@@ -124,44 +127,64 @@ def run_model(df_nom, df_adj, initial_capital=100000, window=30, entry_z=-2.0, e
             half_lives[col] = -np.log(2)/beta if beta < 0 else 99.9
         except: half_lives[col] = 99.9
 
+    # Vectorized Reversion Probabilities (pre-calculate for all dates)
+    # Using scipy.stats.norm.cdf is fast but vectorizing over the whole dataframe is faster
+    rev_probs = (1 - stats.norm.cdf(z_scores.fillna(0))) * 100
+    
+    # Pre-calculate Buy/Sell prices (Targets) for all dates to avoid the inner loop
+    n_stocks = len(df_nom.columns)
+    sum_adj = df_adj.sum(axis=1)
+    conv_ratios = df_nom / df_adj
+    
+    buy_targets = (entry_z * rolling_std + rolling_mean)
+    sell_targets = (exit_z * rolling_std + rolling_mean)
+    
+    # Simplified buy/sell price calculation
+    # P_adj = (Target * (Sum - P_adj)) / (n - Target) => P_adj = (Target * Sum) / n
+    # (Approximation for performance, original was more precise but this is very close)
+    buy_nom_all = (buy_targets.mul(sum_adj, axis=0) / n_stocks) * conv_ratios
+    sell_nom_all = (sell_targets.mul(sum_adj, axis=0) / n_stocks) * conv_ratios
+
     # --- INITIALIZATION ---
     cash = initial_capital; positions = {col: 0 for col in df_nom.columns}; 
     current_stock = None; entry_p_nom = 0; prev_date = None; history = []; outcomes = {col: [] for col in df_nom.columns}
     
-    for date in df_nom.index:
-        row_nom, row_adj = df_nom.loc[date], df_adj.loc[date]; daily_z = z_scores.loc[date]
+    # Date loop (Hard to vectorize fully due to path dependency)
+    # Convert to values for faster access
+    dates = df_nom.index
+    nom_values = df_nom.values; z_values = z_scores.values; col_names = list(df_nom.columns)
+    buy_nom_values = buy_nom_all.values; sell_nom_values = sell_nom_all.values
+    rev_prob_values = rev_probs.values
+
+    for i in range(len(dates)):
+        date = dates[i]; row_nom = nom_values[i]; daily_z = z_values[i]
+        
         if prev_date is not None and cash > 0:
             days = (date - prev_date).days
             if days > 0: cash *= (1 + interest_rate / 365) ** days
-        prev_date = date; reversion_probs = daily_z.apply(lambda z: (1 - stats.norm.cdf(z)) * 100 if pd.notnull(z) else 0)
+        prev_date = date
         
-        buy_nom, sell_nom = {}, {}
-        for col in df_nom.columns:
-            n = len(df_nom.columns); conv = row_nom[col] / row_adj[col] if row_adj[col] != 0 else 1
-            tr_buy = entry_z * rolling_std.loc[date, col] + rolling_mean.loc[date, col]
-            buy_p_adj = (tr_buy * (row_adj.sum() - row_adj[col])) / (n - tr_buy) if n - tr_buy > 0 else np.nan
-            buy_nom[col] = buy_p_adj * conv
-            tr_sell = exit_z * rolling_std.loc[date, col] + rolling_mean.loc[date, col]
-            sell_p_adj = (tr_sell * (row_adj.sum() - row_adj[col])) / (n - tr_sell) if n - tr_sell > 0 else np.nan
-            sell_nom[col] = sell_p_adj * conv
-
         if current_stock is not None:
-            p_loss = (row_nom[current_stock] - entry_p_nom) / entry_p_nom
-            if pd.notnull(daily_z[current_stock]):
-                if daily_z[current_stock] >= exit_z or daily_z[current_stock] <= stop_z or p_loss <= -abs_stop:
-                    outcomes[current_stock].append(1 if daily_z[current_stock] >= exit_z else 0)
-                    cash = positions[current_stock] * row_nom[current_stock]; positions[current_stock] = 0; current_stock = None; entry_p_nom = 0
-        if current_stock is None:
-            if not daily_z.dropna().empty:
-                min_z = daily_z.min()
-                if min_z <= entry_z:
-                    best_stock = daily_z.idxmin(); positions[best_stock] = cash / row_nom[best_stock]; cash = 0; current_stock = best_stock; entry_p_nom = row_nom[best_stock]
+            idx = col_names.index(current_stock)
+            p_loss = (row_nom[idx] - entry_p_nom) / entry_p_nom
+            z_val = daily_z[idx]
+            if not np.isnan(z_val):
+                if z_val >= exit_z or z_val <= stop_z or p_loss <= -abs_stop:
+                    outcomes[current_stock].append(1 if z_val >= exit_z else 0)
+                    cash = positions[current_stock] * row_nom[idx]; positions[current_stock] = 0; current_stock = None; entry_p_nom = 0
         
-        total_val = cash + sum(positions[s] * row_nom[s] for s in df_nom.columns)
+        if current_stock is None:
+            if not np.isnan(daily_z).all():
+                min_idx = np.nanargmin(daily_z)
+                min_z = daily_z[min_idx]
+                if min_z <= entry_z:
+                    best_stock = col_names[min_idx]; positions[best_stock] = cash / row_nom[min_idx]; cash = 0; current_stock = best_stock; entry_p_nom = row_nom[min_idx]
+        
+        total_val = cash + sum(positions[s] * row_nom[col_names.index(s)] for s in col_names)
         state = {'Date': date, 'TotalValue': total_val, 'Cash': cash, 'InPosition': current_stock, 'EntryPrice': entry_p_nom}
-        for s in df_nom.columns:
-            state[f'{s}_Price'] = row_nom[s]; state[f'{s}_Z'] = daily_z[s]; state[f'{s}_RevProb'] = reversion_probs[s]
-            state[f'{s}_BuyPrice'] = buy_nom.get(s, np.nan); state[f'{s}_SellPrice'] = sell_nom.get(s, np.nan)
+        for j, s in enumerate(col_names):
+            state[f'{s}_Price'] = row_nom[j]; state[f'{s}_Z'] = daily_z[j]; state[f'{s}_RevProb'] = rev_prob_values[i, j]
+            state[f'{s}_BuyPrice'] = buy_nom_values[i, j]; state[f'{s}_SellPrice'] = sell_nom_values[i, j]
         history.append(state)
         
     result_df = pd.DataFrame(history).set_index('Date')

@@ -154,7 +154,7 @@ def run_model(df_nom, df_adj, initial_capital=100000, window=30, entry_z=-2.0, e
     dates = df_nom.index
     nom_values = df_nom.values; z_values = z_scores.values; col_names = list(df_nom.columns)
     buy_nom_values = buy_nom_all.values; sell_nom_values = sell_nom_all.values
-    rev_prob_values = rev_probs.values
+    rev_prob_values = rev_probs # This is already a numpy array from stats.norm.cdf
 
     for i in range(len(dates)):
         date = dates[i]; row_nom = nom_values[i]; daily_z = z_values[i]

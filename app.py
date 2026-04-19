@@ -49,45 +49,59 @@ TICKER_MAP = ALL_STOCKS_MAP.copy()
 TICKER_MAP.update({"USDTRY": "USDTRY=X", "XU100": "^XU100", "GOLD": "GC=F"})
 
 # --- OPTIMIZED DATA LOADING ---
+from update_db import update_database, TICKERS, INV_MAP
+
 @st.cache_data(ttl=1800)
 def load_all_data():
-    if not os.path.exists("db_nominal.csv") or not os.path.exists("db_adjusted.csv"):
-        return None, "Database missing"
-
-    df_nom = pd.read_csv("db_nominal.csv", index_col='Date', parse_dates=True)
-    df_adj = pd.read_csv("db_adjusted.csv", index_col='Date', parse_dates=True)
+    nom_file = "db_nominal.csv"
+    adj_file = "db_adjusted.csv"
     
+    # 1. Initial Check
+    if not os.path.exists(nom_file) or not os.path.exists(adj_file):
+        with st.spinner("🚀 Building initial database (this may take a minute)..."):
+            update_database(force_rebuild=True)
+    
+    # 2. Read existing data
+    df_nom = pd.read_csv(nom_file, index_col='Date', parse_dates=True)
+    df_adj = pd.read_csv(adj_file, index_col='Date', parse_dates=True)
+    
+    stock_cols = list(ALL_STOCKS_MAP.keys())
     last_date = df_nom.index.max()
     today = datetime.now()
+    
+    # 3. Smart Update Logic
+    # If data is older than today, or it's a trading day and we might need live prices
+    needs_sync = (today.date() > last_date.date())
+    is_trading_day = (today.weekday() < 5)
+    has_nans = df_nom[stock_cols].iloc[-1].isna().any() if not df_nom.empty else True
+    
     sync_msg = f"DB: {last_date.date()}"
     
-    # 1. Sync Historical Gaps
-    if (today - last_date).days >= 1:
+    if needs_sync or (is_trading_day and has_nans):
         try:
-            raw = yf.download(list(TICKER_MAP.values()), start=last_date, progress=False, auto_adjust=False)
-            if not raw.empty:
-                new_nom = raw['Close']; new_adj = raw['Adj Close']
-                inv_map = {v: k for k, v in TICKER_MAP.items()}
-                new_nom.columns = [inv_map.get(c, c) for c in new_nom.columns]
-                new_adj.columns = [inv_map.get(c, c) for c in new_adj.columns]
-                df_nom = pd.concat([df_nom, new_nom[new_nom.index > last_date]]).sort_index()
-                df_adj = pd.concat([df_adj, new_adj[new_adj.index > last_date]]).sort_index()
-                sync_msg += " | ⚡ Live Sync OK"
-        except: sync_msg += " | ⚠️ History Sync Failed"
-    
-    # 2. LIVE PATCH
-    stock_cols = list(ALL_STOCKS_MAP.keys())
-    if df_nom[stock_cols].iloc[-1].isna().any():
-        with st.spinner("📡 Patching missing prices with live market data..."):
-            for name, symbol in ALL_STOCKS_MAP.items():
-                if pd.isna(df_nom.at[df_nom.index[-1], name]):
-                    try:
-                        live_p = yf.Ticker(symbol).fast_info['lastPrice']
-                        if live_p and live_p > 0:
-                            df_nom.at[df_nom.index[-1], name] = live_p
-                            df_adj.at[df_adj.index[-1], name] = live_p
-                    except: pass
-            sync_msg += " | 🟢 Live Patch Applied"
+            # Batch download is MUCH faster than individual ticker calls
+            # Use period="5d" to ensure we catch any recent gaps/adjustments
+            with st.spinner("📡 Syncing latest market data..."):
+                raw = yf.download(list(TICKERS.values()), period="5d", progress=False, auto_adjust=False)
+                if not raw.empty:
+                    new_nom = raw['Close']; new_adj = raw['Adj Close']
+                    new_nom.columns = [INV_MAP.get(c, c) for c in new_nom.columns]
+                    new_adj.columns = [INV_MAP.get(c, c) for c in new_adj.columns]
+                    
+                    # Merge and update
+                    df_nom = pd.concat([df_nom[df_nom.index < new_nom.index[0]], new_nom]).sort_index()
+                    df_adj = pd.concat([df_adj[df_adj.index < new_adj.index[0]], new_adj]).sort_index()
+                    
+                    # Deduplicate
+                    df_nom = df_nom[~df_nom.index.duplicated(keep='last')]
+                    df_adj = df_adj[~df_adj.index.duplicated(keep='last')]
+                    
+                    # PERSIST TO DISK: This is key for speed on next load
+                    df_nom.to_csv(nom_file)
+                    df_adj.to_csv(adj_file)
+                    sync_msg = f"DB: {df_nom.index.max().date()} | ⚡ Optimized Sync OK"
+        except Exception as e:
+            sync_msg += f" | ⚠️ Sync Failed: {str(e)[:20]}"
 
     # Final Cleanup
     df_nom = df_nom.ffill().dropna(subset=stock_cols, how='all')

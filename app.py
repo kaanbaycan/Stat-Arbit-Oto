@@ -8,6 +8,9 @@ from datetime import datetime, timedelta
 import scipy.stats as stats
 import time
 
+import plotly.express as px
+import plotly.graph_objects as go
+
 # Set page config
 st.set_page_config(page_title="Real-Time Stat-Arb Dashboard", layout="wide")
 
@@ -255,9 +258,11 @@ if master_data:
                 model_res = run_model(sc_nom, sc_adj, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate)
                 if model_res: s_r, _, _ = model_res; comp_results.append({'Sector': s_n, 'Series': s_r['TotalValue'], 'Profit %': (s_r['TotalValue'].iloc[-1]-100000)/1000})
             if comp_results:
-                fig_c, ax_c = plt.subplots(figsize=(10, 4))
-                for r in comp_results: ax_c.plot(r['Series'].index, r['Series'], label=f"{r['Sector']} ({r['Profit %']:.1f}%)")
-                ax_c.legend(); st.pyplot(fig_c)
+                fig_c = go.Figure()
+                for r in comp_results:
+                    fig_c.add_trace(go.Scatter(x=r['Series'].index, y=r['Series'], name=f"{r['Sector']} ({r['Profit %']:.1f}%)"))
+                fig_c.update_layout(template="plotly_dark", height=400, margin=dict(l=20, r=20, t=20, b=20), hovermode="x unified")
+                st.plotly_chart(fig_c, use_container_width=True)
         with tabs[1]:
             moves = []; prev = None
             for d, r in results.iterrows():
@@ -279,9 +284,20 @@ if master_data:
             with tabs[i+3]:
                 c1, c2 = st.columns(2)
                 with c1:
-                    fig_p, ax_p = plt.subplots(); ax_p.plot(results.index, results[f'{name}_Price'], color='gray', alpha=0.5)
-                    pos = results['InPosition']; b = results.index[(pos == name) & (pos.shift(1) != name)]; s = results.index[(pos != name) & (pos.shift(1) == name)]
-                    ax_p.scatter(b, results.loc[b, f'{name}_Price'], color='green', marker='^'); ax_p.scatter(s, results.loc[s, f'{name}_Price'], color='red', marker='v'); st.pyplot(fig_p)
+                    fig_p = go.Figure()
+                    fig_p.add_trace(go.Scatter(x=results.index, y=results[f'{name}_Price'], name=f"{name} Price", line=dict(color='gray', width=1), opacity=0.5))
+                    pos = results['InPosition']
+                    b = results.index[(pos == name) & (pos.shift(1) != name)]
+                    s = results.index[(pos != name) & (pos.shift(1) == name)]
+                    fig_p.add_trace(go.Scatter(x=b, y=results.loc[b, f'{name}_Price'], mode='markers', name='BUY', marker=dict(color='green', symbol='triangle-up', size=10)))
+                    fig_p.add_trace(go.Scatter(x=s, y=results.loc[s, f'{name}_Price'], mode='markers', name='SELL', marker=dict(color='red', symbol='triangle-down', size=10)))
+                    fig_p.update_layout(template="plotly_dark", height=400, margin=dict(l=20, r=20, t=20, b=20), hovermode="x unified", title=f"{name} Price Action")
+                    st.plotly_chart(fig_p, use_container_width=True)
                 with c2:
-                    fig_z, ax_z = plt.subplots(); ax_z.plot(results.index, results[f'{name}_Z'], color='purple'); ax_z.axhline(entry_z, color='green', linestyle='--'); ax_z.axhline(exit_z, color='red', linestyle='--'); st.pyplot(fig_z)
+                    fig_z = go.Figure()
+                    fig_z.add_trace(go.Scatter(x=results.index, y=results[f'{name}_Z'], name="Z-Score", line=dict(color='purple')))
+                    fig_z.add_hline(y=entry_z, line_dash="dash", line_color="green", annotation_text="Entry")
+                    fig_z.add_hline(y=exit_z, line_dash="dash", line_color="red", annotation_text="Exit")
+                    fig_z.update_layout(template="plotly_dark", height=400, margin=dict(l=20, r=20, t=20, b=20), hovermode="x unified", title=f"{name} Z-Score")
+                    st.plotly_chart(fig_z, use_container_width=True)
 else: st.error("Data error.")

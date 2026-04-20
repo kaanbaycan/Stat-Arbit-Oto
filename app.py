@@ -291,9 +291,22 @@ if master_data:
                     st.plotly_chart(fig_p, use_container_width=True)
                 with c2:
                     fig_z = go.Figure()
-                    fig_z.add_trace(go.Scatter(x=results.index, y=results[f'{name}_Z'], name="Z-Score", line=dict(color='purple')))
+                    # Add Z-Score line with custom hover data
+                    fig_z.add_trace(go.Scatter(
+                        x=results.index, 
+                        y=results[f'{name}_Z'], 
+                        name="Z-Score", 
+                        line=dict(color='purple'),
+                        hovertemplate="<b>Date: %{x}</b><br>" +
+                                      "Z-Score: %{y:.2f}<br>" +
+                                      f"Price: %{{customdata[0]:,.2f}} TL<br>" +
+                                      f"Target Buy: %{{customdata[1]:,.2f}}<br>" +
+                                      f"Target Sell: %{{customdata[2]:,.2f}}<br>" +
+                                      "<extra></extra>",
+                        customdata=np.stack((results[f'{name}_Price'], results[f'{name}_BuyPrice'], results[f'{name}_SellPrice']), axis=-1)
+                    ))
                     fig_z.add_hline(y=entry_z, line_dash="dash", line_color="green", annotation_text="Entry")
                     fig_z.add_hline(y=exit_z, line_dash="dash", line_color="red", annotation_text="Exit")
-                    fig_z.update_layout(template="plotly_dark", height=400, margin=dict(l=20, r=20, t=20, b=20), hovermode="x unified", title=f"{name} Z-Score")
+                    fig_z.update_layout(template="plotly_dark", height=400, margin=dict(l=20, r=20, t=20, b=20), hovermode="x unified", title=f"{name} Z-Score Analysis")
                     st.plotly_chart(fig_z, use_container_width=True)
 else: st.error("Data error.")

@@ -87,8 +87,15 @@ def load_all_data():
         sync_msg += " | ⚡ Live (G-Finance)"
 
     # Final Cleanup
+    # Ensure they are aligned and have the same index
     df_nom = df_nom.ffill().dropna(subset=stock_cols, how='all')
     df_adj = df_adj.ffill().dropna(subset=stock_cols, how='all')
+    
+    # Intersect indices to ensure perfect alignment
+    common_index = df_nom.index.intersection(df_adj.index)
+    df_nom = df_nom.loc[common_index]
+    df_adj = df_adj.loc[common_index]
+    
     return {"nom": df_nom, "adj": df_adj}, sync_msg
 
 # 3. Model Logic
@@ -133,13 +140,22 @@ def run_model(df_nom, df_adj, initial_capital=100000, window=30, entry_z=-2.0, e
     current_stock = None; entry_p_nom = 0; prev_date = None; history = []; outcomes = {col: [] for col in df_nom.columns}
     
     # Date loop (Hard to vectorize fully due to path dependency)
-    # Convert to values for faster access
+    # Ensure all data arrays are aligned to the index of df_nom
     dates = df_nom.index
-    nom_values = df_nom.values; z_values = z_scores.values; col_names = list(df_nom.columns)
-    buy_nom_values = buy_nom_all.values; sell_nom_values = sell_nom_all.values
-    rev_prob_values = rev_probs # This is already a numpy array from stats.norm.cdf
+    n_rows = len(dates)
+    
+    # Ensure z_scores is aligned to the same index
+    z_scores_aligned = z_scores.reindex(dates)
+    
+    nom_values = df_nom.values
+    z_values = z_scores_aligned.values
+    col_names = list(df_nom.columns)
+    
+    buy_nom_values = buy_nom_all.reindex(dates).values
+    sell_nom_values = sell_nom_all.reindex(dates).values
+    rev_prob_values = rev_probs.reindex(dates).values if hasattr(rev_probs, "reindex") else rev_probs
 
-    for i in range(len(dates)):
+    for i in range(n_rows):
         date = dates[i]; row_nom = nom_values[i]; daily_z = z_values[i]
         
         if prev_date is not None and cash > 0:

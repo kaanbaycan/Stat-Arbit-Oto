@@ -42,15 +42,26 @@ def get_google_finance_price(ticker, exchange="IST"):
                     return float(div["data-last-price"])
             return None
             
-        # Clean price text: handles "1.234,50 TL" -> "1234.50"
-        txt = price_div.text.replace("₺", "").replace("TL", "").replace("$", "").replace(",", "").strip()
-        # Note: BIST uses comma for decimal in Turkish locale, but Google Finance UI 
-        # often adapts to headers. Let's be robust.
-        if "." in txt and "," in txt: # "1,234.50"
-             txt = txt.replace(",", "")
-        elif "," in txt: # "1234,50"
-             txt = txt.replace(",", ".")
-             
+        # Clean price text: handles "1.234,50 TL" or "14,426.98"
+        txt = price_div.text.replace("₺", "").replace("TL", "").replace("$", "").strip()
+        
+        # Robust number cleaning
+        if "," in txt and "." in txt:
+            # Standard international: 1,234.56 -> 1234.56
+            if txt.find(",") < txt.find("."):
+                txt = txt.replace(",", "")
+            # Turkish/European: 1.234,56 -> 1234.56
+            else:
+                txt = txt.replace(".", "").replace(",", ".")
+        elif "," in txt:
+            # Could be 1,234 (international) or 1234,56 (TR)
+            # If it's BIST, it's likely TR format for decimals
+            # But let's check position of comma
+            if len(txt.split(",")[-1]) == 2: # 1234,56
+                txt = txt.replace(",", ".")
+            else: # 1,234
+                txt = txt.replace(",", "")
+                
         return float(txt)
     except Exception as e:
         print(f"⚠️ Google Finance error for {ticker}: {e}")
@@ -98,6 +109,7 @@ def update_database(force_rebuild=False):
     """
     Updates the local CSV database with the latest data from Yahoo Finance.
     Saves results back to disk to ensure subsequent loads are fast.
+    Returns (success, df_nom, df_adj)
     """
     nom_file = "db_nominal.csv"
     adj_file = "db_adjusted.csv"
@@ -107,22 +119,28 @@ def update_database(force_rebuild=False):
         raw = yf.download(list(TICKERS.values()), start="2016-01-01", progress=True, auto_adjust=False)
         if raw.empty:
             print("❌ Error: No data received.")
-            return False
+            return False, None, None
         
         df_nom = raw['Close']
         df_adj = raw['Adj Close']
         df_nom.columns = [INV_MAP.get(c, c) for c in df_nom.columns]
         df_adj.columns = [INV_MAP.get(c, c) for c in df_adj.columns]
         
-        df_nom.to_csv(nom_file)
-        df_adj.to_csv(adj_file)
-        print(f"✅ Rebuild complete. {len(df_nom)} rows saved.")
-        return True
+        try:
+            df_nom.to_csv(nom_file)
+            df_adj.to_csv(adj_file)
+        except: pass # Could be read-only in some environments
+        
+        print(f"✅ Rebuild complete. {len(df_nom)} rows.")
+        return True, df_nom, df_adj
 
     # Incremental update
     print("🔄 Checking for updates...")
-    df_nom = pd.read_csv(nom_file, index_col='Date', parse_dates=True)
-    df_adj = pd.read_csv(adj_file, index_col='Date', parse_dates=True)
+    try:
+        df_nom = pd.read_csv(nom_file, index_col='Date', parse_dates=True)
+        df_adj = pd.read_csv(adj_file, index_col='Date', parse_dates=True)
+    except:
+        return False, None, None
     
     last_date = df_nom.index.max()
     today = datetime.now()
@@ -146,18 +164,12 @@ def update_database(force_rebuild=False):
 
         # LIVE PRICE INJECTION
         is_trading_day = (today.weekday() < 5)
-        
-        # Check if we need to supplement with live data
         today_date = today.date()
         
-        # We want to fetch live prices if:
-        # 1. Today is a trading day AND
-        # 2. Today's date is missing from our new data OR it has NaNs in stock columns
         needs_live = False
         if is_trading_day:
             stock_cols = [k for k in TICKERS.keys() if k not in ["USDTRY", "XU100", "GOLD"]]
             if not new_nom.empty and today_date in new_nom.index.date:
-                # Check if today's row has NaNs for stocks
                 today_row = new_nom[new_nom.index.date == today_date]
                 if today_row[stock_cols].isna().any().any():
                     needs_live = True
@@ -174,8 +186,6 @@ def update_database(force_rebuild=False):
             if not live_prices.isna().all():
                 today_ts = pd.Timestamp(today_date).replace(hour=today.hour, minute=today.minute)
                 
-                # If today already exists in new_nom, update it
-                # Otherwise, create it
                 if not new_nom.empty and today_date in new_nom.index.date:
                     idx = new_nom.index[new_nom.index.date == today_date][0]
                     for col, val in live_prices.items():
@@ -191,7 +201,7 @@ def update_database(force_rebuild=False):
 
         if new_nom.empty:
             print("ℹ️ No new data found.")
-            return True
+            return True, df_nom, df_adj
 
         # Combine: Keep old data, but update with new data for overlapping dates
         df_nom = pd.concat([df_nom[df_nom.index < new_nom.index[0]], new_nom]).sort_index()
@@ -202,14 +212,16 @@ def update_database(force_rebuild=False):
         df_adj = df_adj[~df_adj.index.duplicated(keep='last')]
 
         # Save to disk
-        df_nom.to_csv(nom_file)
-        df_adj.to_csv(adj_file)
+        try:
+            df_nom.to_csv(nom_file)
+            df_adj.to_csv(adj_file)
+        except: pass
         
         print(f"✅ Database updated. Last date: {df_nom.index.max()}")
-        return True
+        return True, df_nom, df_adj
     except Exception as e:
         print(f"❌ Update failed: {e}")
-        return False
+        return False, df_nom, df_adj
 
 if __name__ == "__main__":
     update_database()

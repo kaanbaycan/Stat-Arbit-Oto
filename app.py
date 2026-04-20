@@ -62,14 +62,14 @@ def load_all_data():
     # 1. Initial Check & Update
     # Always attempt an update, update_database handles the logic of whether it's needed
     with st.spinner("📡 Syncing latest market data..."):
-        success = update_database()
+        success, df_nom, df_adj = update_database()
     
-    # 2. Read existing data
-    if not os.path.exists(nom_file) or not os.path.exists(adj_file):
-        return None, "❌ Database Error"
-
-    df_nom = pd.read_csv(nom_file, index_col='Date', parse_dates=True)
-    df_adj = pd.read_csv(adj_file, index_col='Date', parse_dates=True)
+    # 2. If update_database didn't return data (failed to read or download), try reading from disk
+    if df_nom is None or df_adj is None:
+        if not os.path.exists(nom_file) or not os.path.exists(adj_file):
+            return None, "❌ Database Error"
+        df_nom = pd.read_csv(nom_file, index_col='Date', parse_dates=True)
+        df_adj = pd.read_csv(adj_file, index_col='Date', parse_dates=True)
     
     stock_cols = list(ALL_STOCKS_MAP.keys())
     last_dt = df_nom.index.max()

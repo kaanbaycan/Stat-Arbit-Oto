@@ -13,20 +13,85 @@ TICKERS = {
 
 INV_MAP = {v: k for k, v in TICKERS.items()}
 
+import requests
+from bs4 import BeautifulSoup
+
+def get_google_finance_price(ticker, exchange="IST"):
+    """
+    Scrapes the last price from Google Finance.
+    Used as a fallback for yfinance during market hours.
+    """
+    # Mapping for special tickers
+    if ticker == "USDTRY": url = "https://www.google.com/finance/quote/USD-TRY"
+    elif ticker == "XU100": url = "https://www.google.com/finance/quote/XU100:INDEXIST"
+    elif ticker == "GOLD": url = "https://www.google.com/finance/quote/GCW00:COMEX"
+    else: url = f"https://www.google.com/finance/quote/{ticker}:{exchange}"
+    
+    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Look for price in specific div or by data-last-price attribute
+        price_div = soup.find("div", {"class": "YMlS7e"})
+        if not price_div:
+            # Try finding by looking for any div with data-last-price
+            for div in soup.find_all("div"):
+                if div.has_attr("data-last-price"):
+                    return float(div["data-last-price"])
+            return None
+            
+        # Clean price text: handles "1.234,50 TL" -> "1234.50"
+        txt = price_div.text.replace("₺", "").replace("TL", "").replace("$", "").replace(",", "").strip()
+        # Note: BIST uses comma for decimal in Turkish locale, but Google Finance UI 
+        # often adapts to headers. Let's be robust.
+        if "." in txt and "," in txt: # "1,234.50"
+             txt = txt.replace(",", "")
+        elif "," in txt: # "1234,50"
+             txt = txt.replace(",", ".")
+             
+        return float(txt)
+    except Exception as e:
+        print(f"⚠️ Google Finance error for {ticker}: {e}")
+        return None
+
 def get_live_prices(ticker_map):
     """
-    Fetches the most recent price for all tickers using fast_info.
-    Returns a pandas Series.
+    Fetches the most recent price for all tickers.
+    Tries yfinance first, but prefers Google Finance for BIST tickers during market hours.
     """
+    now = datetime.now()
+    is_bist_hours = (now.weekday() < 5) and (10 <= now.hour < 18)
+    
     tickers_obj = yf.Tickers(list(ticker_map.values()))
     live_data = {}
+    
     for short_name, full_symbol in ticker_map.items():
-        try:
-            # Use fast_info['lastPrice'] for speed and reliability during market hours
-            live_data[short_name] = tickers_obj.tickers[full_symbol].fast_info['lastPrice']
-        except Exception as e:
-            print(f"⚠️ Could not fetch live price for {short_name}: {e}")
-            live_data[short_name] = None
+        price = None
+        is_bist = full_symbol.endswith(".IS") or full_symbol == "^XU100"
+        
+        # 1. During BIST hours, try Google Finance FIRST for BIST stocks
+        if is_bist and is_bist_hours:
+            # print(f"🚀 Preferring Google Finance for {short_name} during market hours...")
+            price = get_google_finance_price(short_name)
+        
+        # 2. If not BIST, or Google failed, or outside hours, try yfinance
+        if price is None:
+            try:
+                fast_info = tickers_obj.tickers[full_symbol].fast_info
+                price = fast_info['lastPrice']
+                # Basic check for 0 or None
+                if price == 0: price = None
+            except: pass
+            
+        # 3. Final Fallback if yfinance also failed
+        if price is None:
+            # print(f"🔍 Final fallback to Google Finance for {short_name}...")
+            price = get_google_finance_price(short_name)
+            
+        live_data[short_name] = price
+        
     return pd.Series(live_data)
 
 def update_database(force_rebuild=False):

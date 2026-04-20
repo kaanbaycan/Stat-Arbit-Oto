@@ -6,3 +6,5 @@ yfinance
 scipy
 openpyxl
 plotly
+requests
+beautifulsoup4

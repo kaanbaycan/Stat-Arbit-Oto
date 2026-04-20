@@ -72,13 +72,19 @@ def load_all_data():
     df_adj = pd.read_csv(adj_file, index_col='Date', parse_dates=True)
     
     stock_cols = list(ALL_STOCKS_MAP.keys())
-    last_date = df_nom.index.max()
+    last_dt = df_nom.index.max()
     
-    sync_msg = f"DB: {last_date.strftime('%Y-%m-%d %H:%M') if hasattr(last_date, 'hour') else last_date.date()}"
+    # Format the sync message
+    current_time = datetime.now().strftime("%H:%M:%S")
+    if hasattr(last_dt, 'hour') and last_dt.hour != 0:
+        sync_msg = f"Last Data: {last_dt.strftime('%H:%M')} | Refreshed: {current_time}"
+    else:
+        sync_msg = f"Last Data: {last_dt.date()} | Refreshed: {current_time}"
+        
     if not success:
         sync_msg += " | ⚠️ Sync Issue"
     else:
-        sync_msg += " | ⚡ Live"
+        sync_msg += " | ⚡ Live (G-Finance)"
 
     # Final Cleanup
     df_nom = df_nom.ffill().dropna(subset=stock_cols, how='all')

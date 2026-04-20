@@ -200,7 +200,9 @@ if master_data:
     abs_stop = st.sidebar.slider("Absolute Stop Loss %", 0.01, 0.30, 0.10); interest_rate = st.sidebar.slider("Idle Cash Yearly Interest", 0.0, 1.0, 0.35)
 
     st.subheader("🎯 Market Opportunity Radar")
-    radar_data = []
+    radar_data = []; alerts = []
+    proximity_threshold = 0.25 # Z-score distance for warnings
+
     for s_name, s_tickers in SECTORS.items():
         stocks = [s for s in s_tickers.keys() if s in master_data['nom'].columns]
         if not stocks: continue
@@ -208,6 +210,23 @@ if master_data:
         m_res = run_model(s_nom, s_adj, 100000, window, entry_z, exit_z, stop_z, abs_stop, interest_rate)
         if m_res:
             s_res, _, _ = m_res; latest_r = s_res.iloc[-1]; active_r = latest_r['InPosition']
+            
+            # Alert Logic
+            for s in stocks:
+                current_z = latest_r[f'{s}_Z']
+                if pd.isna(current_z): continue
+                
+                # Near Entry Alert
+                if active_r is None and current_z <= (entry_z + proximity_threshold) and current_z > entry_z:
+                    alerts.append({"Level": "⚠️ WATCH", "Msg": f"{s}: Alım bölgesine çok yakın! (Z: {current_z:.2f})"})
+                elif active_r is None and current_z <= entry_z:
+                    alerts.append({"Level": "🚀 ENTRY", "Msg": f"{s}: STRATEJİK ALIM BÖLGESİNDE! (Z: {current_z:.2f})"})
+                
+                # Near Exit Alert
+                if active_r == s:
+                    if current_z >= (exit_z - proximity_threshold):
+                        alerts.append({"Level": "💰 EXIT", "Msg": f"{s}: Satış hedefine yaklaşıyor, kar almayı düşün! (Z: {current_z:.2f})"})
+
             if pd.notnull(active_r):
                 radar_data.append({'Sector': s_name, 'Status': '🔴 HOLDING', 'Stock': active_r, 'Price': f"{latest_r[f'{active_r}_Price']:,.2f}", 'Rev Prob': f"{latest_r[f'{active_r}_RevProb']:.1f}%", 'Target': f"{latest_r[f'{active_r}_SellPrice']:,.2f}"})
             else:
@@ -216,6 +235,16 @@ if master_data:
                 if not z_series.empty:
                     min_z_s = z_series.idxmin().replace('_Z', '')
                     radar_data.append({'Sector': s_name, 'Status': '🟢 MONITORING', 'Stock': min_z_s, 'Price': f"{latest_r[f'{min_z_s}_Price']:,.2f}", 'Rev Prob': f"{latest_r[f'{min_z_s}_RevProb']:.1f}%", 'Target': f"{latest_r[f'{min_z_s}_BuyPrice']:,.2f} (BUY)"})
+    
+    # Show Alerts if any
+    if alerts:
+        for a in alerts:
+            if "ENTRY" in a['Level']: st.success(f"**{a['Level']}** | {a['Msg']}")
+            elif "EXIT" in a['Level']: st.error(f"**{a['Level']}** | {a['Msg']}")
+            else: st.warning(f"**{a['Level']}** | {a['Msg']}")
+            # Show a toast for 5 seconds
+            st.toast(a['Msg'], icon="🚨")
+
     if radar_data: st.table(pd.DataFrame(radar_data).set_index('Sector'))
 
     st.markdown("---")

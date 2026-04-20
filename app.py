@@ -272,7 +272,7 @@ if master_data:
         st.html(terminal_html + "</div>")
         m1, m2 = st.columns(2); m1.metric("Portfolio Value", f"{latest['TotalValue']:,.0f} TL"); m2.metric("Nominal Profit", f"{(latest['TotalValue']-100000)/1000:.1f}%")
 
-        tabs = st.tabs(["Sector Comparison", "History", "Stats"] + stocks_detail)
+        tabs = st.tabs(["Sector Comparison", "History", "Stats", "About & Strategy"] + stocks_detail)
         with tabs[0]:
             comp_results = []
             for s_n, s_t in SECTORS.items():
@@ -288,6 +288,7 @@ if master_data:
                     fig_c.add_trace(go.Scatter(x=r['Series'].index, y=r['Series'], name=f"{r['Sector']} ({r['Profit %']:.1f}%)"))
                 fig_c.update_layout(template="plotly_dark", height=400, margin=dict(l=20, r=20, t=20, b=20), hovermode="x unified")
                 st.plotly_chart(fig_c, use_container_width=True)
+        
         with tabs[1]:
             moves = []; prev = None
             for d, r in results.iterrows():
@@ -304,9 +305,50 @@ if master_data:
                             if m_df.iloc[j]['Action'] == 'BUY' and m_df.iloc[j]['Ticker'] == m_df.iloc[i]['Ticker']:
                                 bp, sp = m_df.iloc[j]['Price'], m_df.iloc[i]['Price']; m_df.at[i, 'Profit %'] = f"{(sp-bp)/bp*100:+.2f}%"; m_df.at[i, 'Hold Duration'] = f"{(m_df.iloc[i]['Date']-m_df.iloc[j]['Date']).days} days"; break
                 st.dataframe(m_df.sort_values('Date', ascending=False), use_container_width=True)
+        
         with tabs[2]: st.table(pd.DataFrame({'Win Rate (%)': win_rates, 'Half-Life (Days)': half_lives}))
+        
+        with tabs[3]:
+            st.markdown("""
+            ### 📖 The Story Behind the Strategy
+            This dashboard implements a **Statistical Arbitrage (Mean Reversion)** strategy applied to Sector Peers within the Borsa Istanbul (BIST). 
+            The core idea is based on the observation that companies within the same sector (e.g., Automotive, Aviation) tend to move together in the long run due to shared economic drivers.
+
+            **The logic is simple but powerful:**
+            1.  **Peer Grouping:** We group stocks that are fundamentally linked (like FROTO, DOAS, and TOASO).
+            2.  **Relative Value:** Instead of looking at absolute prices, we calculate a 'Sector Ratio'. If one stock's price deviates significantly from its peers, it's often a temporary mispricing.
+            3.  **Z-Score Monitoring:** We use a 'Z-Score' to measure how many standard deviations a stock is away from its historical average ratio.
+            4.  **The Trade:** When a stock becomes "too cheap" relative to its sector (Z-Score < -2.0), we buy it, betting it will return to the mean. We sell when it recovers (Z-Score > 0.5).
+
+            ---
+            ### 📊 Backtest Performance Statistics
+            *Analysis based on current sector and selected year range.*
+            """)
+            
+            # Calculate Backtest Stats
+            total_days = (results.index[-1] - results.index[0]).days
+            total_return = (results['TotalValue'].iloc[-1] - 100000) / 100000
+            cagr = (1 + total_return) ** (365.25 / total_days) - 1
+            
+            # Max Drawdown
+            rolling_max = results['TotalValue'].cummax()
+            drawdown = (results['TotalValue'] - rolling_max) / rolling_max
+            max_drawdown = drawdown.min()
+            
+            col_s1, col_s2, col_s3 = st.columns(3)
+            col_s1.metric("Total Return", f"{total_return*100:.1f}%")
+            col_s2.metric("CAGR (Annual)", f"{cagr*100:.1f}%")
+            col_s3.metric("Max Drawdown", f"{max_drawdown*100:.1f}%")
+            
+            st.markdown(f"""
+            *   **Initial Capital:** 100,000 TL
+            *   **Final Value:** {results['TotalValue'].iloc[-1]:,.0f} TL
+            *   **Trading Period:** {results.index[0].date()} to {results.index[-1].date()}
+            *   **Sector Assets:** {', '.join(stocks_detail)}
+            """)
+
         for i, name in enumerate(stocks_detail):
-            with tabs[i+3]:
+            with tabs[i+4]:
                 c1, c2 = st.columns(2)
                 with c1:
                     fig_p = go.Figure()

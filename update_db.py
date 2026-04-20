@@ -148,25 +148,25 @@ def update_database(force_rebuild=False):
         print("⚡ Fetching primary live prices from Google Finance...")
         live_prices = get_live_prices(TICKERS)
         if not live_prices.isna().all():
-            today_ts = pd.Timestamp(today_date)
-            
-            # Create or update today's row with Google data
-            # This ensures we have the latest even if yf.download is stale/failed
-            live_row = pd.DataFrame([live_prices], index=[today_ts])
-            
-            if not new_nom.empty and today_ts in new_nom.index:
-                # Update existing yfinance row with fresher Google prices where available
-                for col in live_prices.index:
-                    if not pd.isna(live_prices[col]):
-                        new_nom.loc[today_ts, col] = live_prices[col]
-                        new_adj.loc[today_ts, col] = live_prices[col]
-            else:
-                # Append new live row
-                new_nom = pd.concat([new_nom, live_row]).sort_index()
-                new_adj = pd.concat([new_adj, live_row]).sort_index()
-            
-            print(f"✅ Live data injected for {today_date}")
+            # Round to nearest 15 minutes to capture intraday movements without bloating DB
+            now = datetime.now()
+            minute = (now.minute // 15) * 15
+            today_ts = pd.Timestamp(now.date()).replace(hour=now.hour, minute=minute, second=0, microsecond=0)
 
+            # Create or update today's specific 15-min row
+            live_row = pd.DataFrame([live_prices], index=[today_ts])
+
+            # Merge with new_nom/new_adj
+            if not new_nom.empty:
+                # If yf.download also returned today (usually as 00:00), 
+                # we prefer our timestamped Google data for intraday
+                new_nom = pd.concat([new_nom[new_nom.index.date != today_date], live_row]).sort_index()
+                new_adj = pd.concat([new_adj[new_adj.index.date != today_date], live_row]).sort_index()
+            else:
+                new_nom = live_row
+                new_adj = live_row
+
+            print(f"✅ Intraday data injected for {today_ts}")
     if new_nom.empty:
         return True, df_nom, df_adj
 

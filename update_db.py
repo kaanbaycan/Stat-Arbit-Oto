@@ -70,72 +70,53 @@ def get_google_finance_price(ticker, exchange="IST"):
 def get_live_prices(ticker_map):
     """
     Fetches the most recent price for all tickers.
-    Tries yfinance first, but prefers Google Finance for BIST tickers during market hours.
+    Prioritizes Google Finance for speed and accuracy during market hours.
     """
-    now = datetime.now()
-    is_bist_hours = (now.weekday() < 5) and (10 <= now.hour < 18)
-    
-    tickers_obj = yf.Tickers(list(ticker_map.values()))
     live_data = {}
     
-    for short_name, full_symbol in ticker_map.items():
-        price = None
-        is_bist = full_symbol.endswith(".IS") or full_symbol == "^XU100"
+    # We fetch Google Finance prices for EVERYTHING first because it's more reliable for intraday
+    for short_name in ticker_map.keys():
+        # print(f"🚀 Fetching {short_name} from Google Finance...")
+        price = get_google_finance_price(short_name)
         
-        # 1. During BIST hours, try Google Finance FIRST for BIST stocks
-        if is_bist and is_bist_hours:
-            # print(f"🚀 Preferring Google Finance for {short_name} during market hours...")
-            price = get_google_finance_price(short_name)
-        
-        # 2. If not BIST, or Google failed, or outside hours, try yfinance
+        # If Google fails, only then try yfinance as a secondary backup
         if price is None:
             try:
-                fast_info = tickers_obj.tickers[full_symbol].fast_info
-                price = fast_info['lastPrice']
-                # Basic check for 0 or None
+                full_symbol = ticker_map[short_name]
+                ticker_obj = yf.Ticker(full_symbol)
+                price = ticker_obj.fast_info['lastPrice']
                 if price == 0: price = None
-            except: pass
-            
-        # 3. Final Fallback if yfinance also failed
-        if price is None:
-            # print(f"🔍 Final fallback to Google Finance for {short_name}...")
-            price = get_google_finance_price(short_name)
-            
+            except:
+                price = None
+                
         live_data[short_name] = price
         
     return pd.Series(live_data)
 
 def update_database(force_rebuild=False):
     """
-    Updates the local CSV database with the latest data from Yahoo Finance.
-    Saves results back to disk to ensure subsequent loads are fast.
-    Returns (success, df_nom, df_adj)
+    Updates the local CSV database with the latest data.
     """
     nom_file = "db_nominal.csv"
     adj_file = "db_adjusted.csv"
     
     if force_rebuild or not os.path.exists(nom_file) or not os.path.exists(adj_file):
+        # Rebuild logic remains the same as it's for historical data
         print("🚀 Rebuilding entire database from 2016...")
         raw = yf.download(list(TICKERS.values()), start="2016-01-01", progress=True, auto_adjust=False)
         if raw.empty:
-            print("❌ Error: No data received.")
             return False, None, None
         
-        df_nom = raw['Close']
-        df_adj = raw['Adj Close']
+        df_nom = raw['Close']; df_adj = raw['Adj Close']
         df_nom.columns = [INV_MAP.get(c, c) for c in df_nom.columns]
         df_adj.columns = [INV_MAP.get(c, c) for c in df_adj.columns]
         
         try:
-            df_nom.to_csv(nom_file)
-            df_adj.to_csv(adj_file)
-        except: pass # Could be read-only in some environments
-        
-        print(f"✅ Rebuild complete. {len(df_nom)} rows.")
+            df_nom.to_csv(nom_file); df_adj.to_csv(adj_file)
+        except: pass
         return True, df_nom, df_adj
 
     # Incremental update
-    print("🔄 Checking for updates...")
     try:
         df_nom = pd.read_csv(nom_file, index_col='Date', parse_dates=True)
         df_adj = pd.read_csv(adj_file, index_col='Date', parse_dates=True)
@@ -144,84 +125,64 @@ def update_database(force_rebuild=False):
     
     last_date = df_nom.index.max()
     today = datetime.now()
-    
-    # Use a small buffer to handle potential adjustments/corrections in recent days
     start_sync = last_date - timedelta(days=3)
     
-    print(f"📡 Syncing from {start_sync.date()}...")
+    new_nom = pd.DataFrame(); new_adj = pd.DataFrame()
+
+    # 1. Attempt yfinance history sync (wrapped in try-except to not block live data)
     try:
-        # Batch download for history
+        print(f"📡 Checking history from {start_sync.date()}...")
         raw = yf.download(list(TICKERS.values()), start=start_sync, progress=False, auto_adjust=False)
-        
         if not raw.empty:
-            new_nom = raw['Close']
-            new_adj = raw['Adj Close']
+            new_nom = raw['Close']; new_adj = raw['Adj Close']
             new_nom.columns = [INV_MAP.get(c, c) for c in new_nom.columns]
             new_adj.columns = [INV_MAP.get(c, c) for c in new_adj.columns]
-        else:
-            new_nom = pd.DataFrame()
-            new_adj = pd.DataFrame()
-
-        # LIVE PRICE INJECTION
-        is_trading_day = (today.weekday() < 5)
-        today_date = today.date()
-        
-        needs_live = False
-        if is_trading_day:
-            stock_cols = [k for k in TICKERS.keys() if k not in ["USDTRY", "XU100", "GOLD"]]
-            if not new_nom.empty and today_date in new_nom.index.date:
-                today_row = new_nom[new_nom.index.date == today_date]
-                if today_row[stock_cols].isna().any().any():
-                    needs_live = True
-            elif not df_nom.empty and today_date in df_nom.index.date:
-                today_row = df_nom[df_nom.index.date == today_date]
-                if today_row[stock_cols].isna().any().any():
-                    needs_live = True
-            else:
-                needs_live = True
-
-        if needs_live:
-            print("⚡ Fetching live intraday prices to fill gaps...")
-            live_prices = get_live_prices(TICKERS)
-            if not live_prices.isna().all():
-                today_ts = pd.Timestamp(today_date).replace(hour=today.hour, minute=today.minute)
-                
-                if not new_nom.empty and today_date in new_nom.index.date:
-                    idx = new_nom.index[new_nom.index.date == today_date][0]
-                    for col, val in live_prices.items():
-                        if pd.isna(new_nom.at[idx, col]) or new_nom.at[idx, col] == 0:
-                            new_nom.at[idx, col] = val
-                            if col in new_adj.columns:
-                                new_adj.at[idx, col] = val
-                else:
-                    live_row = pd.DataFrame([live_prices], index=[today_ts])
-                    new_nom = pd.concat([new_nom, live_row])
-                    new_adj = pd.concat([new_adj, live_row])
-                print(f"✅ Supplemental live data injected for {today_date}")
-
-        if new_nom.empty:
-            print("ℹ️ No new data found.")
-            return True, df_nom, df_adj
-
-        # Combine: Keep old data, but update with new data for overlapping dates
-        df_nom = pd.concat([df_nom[df_nom.index < new_nom.index[0]], new_nom]).sort_index()
-        df_adj = pd.concat([df_adj[df_adj.index < new_adj.index[0]], new_adj]).sort_index()
-        
-        # Deduplicate indices just in case
-        df_nom = df_nom[~df_nom.index.duplicated(keep='last')]
-        df_adj = df_adj[~df_adj.index.duplicated(keep='last')]
-
-        # Save to disk
-        try:
-            df_nom.to_csv(nom_file)
-            df_adj.to_csv(adj_file)
-        except: pass
-        
-        print(f"✅ Database updated. Last date: {df_nom.index.max()}")
-        return True, df_nom, df_adj
     except Exception as e:
-        print(f"❌ Update failed: {e}")
-        return False, df_nom, df_adj
+        print(f"⚠️ History sync failed (non-critical): {e}")
+
+    # 2. LIVE PRICE INJECTION (Google Finance Primary)
+    is_trading_day = (today.weekday() < 5)
+    today_date = today.date()
+    
+    if is_trading_day:
+        print("⚡ Fetching primary live prices from Google Finance...")
+        live_prices = get_live_prices(TICKERS)
+        if not live_prices.isna().all():
+            today_ts = pd.Timestamp(today_date)
+            
+            # Create or update today's row with Google data
+            # This ensures we have the latest even if yf.download is stale/failed
+            live_row = pd.DataFrame([live_prices], index=[today_ts])
+            
+            if not new_nom.empty and today_ts in new_nom.index:
+                # Update existing yfinance row with fresher Google prices where available
+                for col in live_prices.index:
+                    if not pd.isna(live_prices[col]):
+                        new_nom.loc[today_ts, col] = live_prices[col]
+                        new_adj.loc[today_ts, col] = live_prices[col]
+            else:
+                # Append new live row
+                new_nom = pd.concat([new_nom, live_row]).sort_index()
+                new_adj = pd.concat([new_adj, live_row]).sort_index()
+            
+            print(f"✅ Live data injected for {today_date}")
+
+    if new_nom.empty:
+        return True, df_nom, df_adj
+
+    # 3. Merge and Deduplicate
+    df_nom = pd.concat([df_nom[df_nom.index < new_nom.index[0]], new_nom]).sort_index()
+    df_adj = pd.concat([df_adj[df_adj.index < new_adj.index[0]], new_adj]).sort_index()
+    df_nom = df_nom[~df_nom.index.duplicated(keep='last')]
+    df_adj = df_adj[~df_adj.index.duplicated(keep='last')]
+
+    # Save to disk
+    try:
+        df_nom.to_csv(nom_file); df_adj.to_csv(adj_file)
+    except: pass
+    
+    print(f"✅ DB Updated. Latest: {df_nom.index.max()}")
+    return True, df_nom, df_adj
 
 if __name__ == "__main__":
     update_database()

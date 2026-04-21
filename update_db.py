@@ -112,6 +112,8 @@ def update_database(force_rebuild=False):
         df_adj.columns = [INV_MAP.get(c, c) for c in df_adj.columns]
         
         try:
+            df_nom.index.name = 'Date'
+            df_adj.index.name = 'Date'
             df_nom.to_csv(nom_file); df_adj.to_csv(adj_file)
         except: pass
         return True, df_nom, df_adj
@@ -178,7 +180,10 @@ def update_database(force_rebuild=False):
 
     # Save to disk
     try:
-        df_nom.to_csv(nom_file); df_adj.to_csv(adj_file)
+        df_nom.index.name = 'Date'
+        df_adj.index.name = 'Date'
+        df_nom.to_csv(nom_file)
+        df_adj.to_csv(adj_file)
     except: pass
     
     print(f"✅ DB Updated. Latest: {df_nom.index.max()}")
